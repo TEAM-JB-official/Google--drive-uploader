@@ -10,6 +10,7 @@ MONGO_URL = os.getenv("MONGO_URL", "mongodb+srv://rs92573993688:pVf4EeDuRi2o92ex
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 LOG_CHANNEL = int(os.getenv("LOG_CHANNEL", "-1003909289740"))
+auth_url = f"{DOMAIN}/auth/login?user_id={user_id}"
 DOMAIN = os.getenv("DOMAIN", "https://integral-kial-jsssbeniwa-7e4dcaa1.koyeb.app")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://integral-kial-jsssbeniwa-7e4dcaa1.koyeb.app/auth/callback")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "8043316865").split(",") if x]
