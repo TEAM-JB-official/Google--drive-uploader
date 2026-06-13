@@ -9,16 +9,20 @@ from db.mongo import users_col
 app = FastAPI()
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+BASE_DOMAIN = DOMAIN.rstrip('/')   # remove trailing slash if any
 
-# Serve success page
+# Serve success page (inline HTML, no static file needed)
 @app.get("/success.html", response_class=HTMLResponse)
 async def success_page():
     return """
+    <!DOCTYPE html>
     <html>
     <head><title>Google Drive Bot - Success</title></head>
-    <body>
-    <h1>✅ Authentication Successful</h1>
-    <p>You may close this window and return to Telegram bot.</p>
+    <body style="text-align:center;font-family:Arial;padding:50px;background:#4CAF50;color:white;">
+        <h1>✅ Authentication Successful</h1>
+        <p>Your Google Drive is now connected to the bot.</p>
+        <p>You may close this window and return to Telegram bot.</p>
+        <script>setTimeout(() => window.close(), 4000);</script>
     </body>
     </html>
     """
@@ -38,12 +42,17 @@ async def auth_login(user_id: int):
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI,
     )
-    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
-    # Encode user_id in state
-    return RedirectResponse(url=f"{auth_url}&state={user_id}")
+    # IMPORTANT: pass user_id as the 'state' parameter directly
+    auth_url, _ = flow.authorization_url(
+        prompt="consent",
+        access_type="offline",
+        include_granted_scopes="true",
+        state=str(user_id)   # <-- this is the fix
+    )
+    return RedirectResponse(auth_url)  # no manual &state= appended
 
 @app.get("/auth/callback")
-async def auth_callback(request: Request, code: str, state: str = None):
+async def auth_callback(code: str, state: str = None):
     if not state:
         raise HTTPException(400, "Missing state")
     try:
@@ -71,19 +80,17 @@ async def auth_callback(request: Request, code: str, state: str = None):
         "client_secret": creds.client_secret,
         "scopes": creds.scopes
     }
-    # Get user email
     from google.oauth2.credentials import Credentials
     creds_obj = Credentials.from_authorized_user_info(creds_dict)
     service = build("drive", "v3", credentials=creds_obj)
     about = service.about().get(fields="user").execute()
     email = about["user"]["emailAddress"]
-    # Store in DB
     await users_col.update_one(
         {"_id": user_id},
         {"$set": {"drive_tokens": creds_dict, "email": email}},
         upsert=True
     )
-    return RedirectResponse(url=f"{DOMAIN}/success.html")
+    return RedirectResponse(url=f"{BASE_DOMAIN}/success.html")  # using BASE_DOMAIN
 
 @app.get("/health")
 async def health():
