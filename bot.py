@@ -7,7 +7,7 @@ from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_IDS, DOMAIN, PLANS
-from db.mongo import users_col
+from db.mongo import users_col, logs_col
 from utils.limits import check_quota, get_remaining_uploads
 from utils.drive import validate_folder
 from utils.queue import add_to_queue
