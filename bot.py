@@ -5,6 +5,7 @@ import random
 import string
 import time
 import re
+import hashlib
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -24,8 +25,8 @@ app = Client("gdrive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN
 import utils.logger
 utils.logger.bot_instance = app
 
-_download_pending = {}
 user_tasks = {}
+_download_pending = {}  # for large file confirmations
 
 # ========== Helper Functions ==========
 async def get_user(user_id):
@@ -62,11 +63,13 @@ def make_safe_progress_callback(status_msg, text, task_id):
     return progress_sync
 
 async def _progress_coro(current, total, status_msg, text, task_id):
-    percent = (current * 100) // total if total else 0
-    bar = "█" * (percent // 10) + "░" * (10 - (percent // 10))
+    if total <= 0:
+        return
+    percent = (current * 100) // total
+    bar = "█" * (percent // 5) + "░" * (20 - (percent // 5))
     try:
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{task_id}")]]) if task_id else None
-        await status_msg.edit_text(f"{text}\n{bar} {percent}%", reply_markup=keyboard)
+        await status_msg.edit_text(f"{text}\n[{bar}] {percent}%", reply_markup=keyboard)
     except:
         pass
 
@@ -75,8 +78,8 @@ async def progress_callback(current, total, status_msg, text, task_id=None):
 
 def format_storage_bar(used_gb, total_gb):
     percent = (used_gb / total_gb) * 100 if total_gb else 0
-    filled = int(percent // 10)
-    bar = "🟩" * filled + "⬜" * (10 - filled)
+    filled = int(percent // 5)
+    bar = "🟩" * filled + "⬜" * (20 - filled)
     return bar, percent
 
 def get_quota_reset_time(user):
@@ -246,7 +249,7 @@ async def stats_cmd(client, message):
         f"**Trash:** {trash_gb:.2f} GB\n"
         f"**Free:** {free_gb:.2f} GB\n\n"
         f"{bar} ({percent:.2f}%) used of {total_gb:.1f} GB."
-    )
+        )
 
 @app.on_message(filters.command("account"))
 async def account_cmd(client, message):
@@ -348,7 +351,7 @@ async def remove_folder_cmd(client, message):
     await users_col.update_one({"_id": user_id}, {"$set": {"custom_folder_id": None}})
     await message.reply("✅ Custom folder removed. Uploads go to Drive root.")
 
-# ========== File Upload Handlers (Part 2 continues) ==========
+# ========== File Upload Handlers ==========
 async def process_file_upload(client, message, user, folder_id):
     user_id = message.from_user.id
     status_msg = await message.reply("⏳ Downloading file...")
@@ -404,21 +407,6 @@ async def handle_file(client, message):
     folder_id = user.get("custom_folder_id")
     await process_file_upload(client, message, user, folder_id)
 
-import hashlib
-
-def shorten_filename(original_name: str, max_total_len: int = 200, suffix_len: int = 8) -> str:
-    """
-    Shorten a filename to fit within filesystem limits.
-    Keeps extension, appends a hash suffix for uniqueness.
-    """
-    name, ext = os.path.splitext(original_name)
-    max_name_len = max_total_len - len(ext) - suffix_len - 1  # -1 for separator
-    if len(name) <= max_name_len:
-        return original_name
-    short_name = name[:max_name_len]
-    name_hash = hashlib.sha256(original_name.encode()).hexdigest()[:suffix_len]
-    return f"{short_name}_{name_hash}{ext}"
-
 @app.on_message(filters.command("upload"))
 async def upload_url_cmd(client, message):
     user_id = message.from_user.id
@@ -440,12 +428,10 @@ async def upload_url_cmd(client, message):
     folder_id = user.get("custom_folder_id")
     status_msg = await message.reply("⏳ Downloading from URL...")
     os.makedirs("downloads", exist_ok=True)
-
-    # Shorten filename safely
-    safe_name = shorten_filename(filename, max_total_len=100)
-    short_suffix = str(uuid.uuid4())[:8]
-    file_path = f"downloads/{user_id}_{short_suffix}_{safe_name}"
-
+    # Use a very short filename: random suffix + extension
+    name, ext = os.path.splitext(filename)
+    short_name = f"{uuid.uuid4().hex[:8]}{ext}"
+    file_path = f"downloads/{user_id}_{short_name}"
     try:
         task_id = str(uuid.uuid4())
         user_tasks.setdefault(user_id, {})[task_id] = asyncio.current_task()
@@ -453,12 +439,11 @@ async def upload_url_cmd(client, message):
         size_mb = os.path.getsize(file_path) / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
         active_email = user.get("active_drive")
-        add_to_queue(user_id, file_path, safe_name, folder_id, status_msg.edit_text, email=active_email)
-        await log_action(user_id, "upload", "queued", safe_name, size_mb)
+        add_to_queue(user_id, file_path, filename, folder_id, status_msg.edit_text, email=active_email)
+        await log_action(user_id, "upload", "queued", filename, size_mb)
     except asyncio.CancelledError:
         await status_msg.edit_text("❌ Cancelled.")
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        if os.path.exists(file_path): os.remove(file_path)
     except Exception as e:
         await status_msg.edit_text(f"❌ Download failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
@@ -501,39 +486,31 @@ async def youtube_cmd(client, message):
         await log_action(user_id, "upload", "failed", error=str(e))
 
 # ========== Drive Download (getdrive) ==========
-# Temporary storage for large file confirmations
-_download_pending = {}
-
 async def _drive_download_progress(current, total, status_msg, task_id):
     if total <= 0:
         return
     percent = (current * 100) // total
-    bar_length = 25
-    filled = int(bar_length * current // total)
-    bar = "█" * filled + "░" * (bar_length - filled)
+    bar = "█" * (percent // 5) + "░" * (20 - (percent // 5))
     current_mb = current / (1024*1024)
     total_mb = total / (1024*1024)
     try:
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_dl_{task_id}")]])
-        await status_msg.edit_text(f"⏳ Downloading from Drive...\n\n[{bar}] {percent}%\n\n➡️ {current_mb:.1f} MB of {total_mb:.1f} MB", reply_markup=keyboard)
+        await status_msg.edit_text(f"⏳ Downloading from Drive...\n[{bar}] {percent}%\n\n➡️ {current_mb:.1f} MB of {total_mb:.1f} MB", reply_markup=keyboard)
     except:
         pass
 
-async def download_drive_file(client, message, service, file_id, filename, file_size, status_msg):
+async def download_drive_file(client, message, service, file_id, original_filename, file_size, status_msg):
     user_id = message.chat.id if hasattr(message, 'chat') else message.from_user.id
     os.makedirs("downloads", exist_ok=True)
-
-    # Shorten filename to safe length
-    safe_filename = shorten_filename(filename, max_total_len=100)
-    short_suffix = str(uuid.uuid4())[:8]
-    temp_path = f"downloads/{user_id}_{short_suffix}_{safe_filename}"
-
+    # Use a very short random filename (8 hex chars + extension)
+    ext = os.path.splitext(original_filename)[1] or ".bin"
+    short_name = f"{uuid.uuid4().hex[:8]}{ext}"
+    temp_path = f"downloads/{user_id}_{short_name}"
     try:
         task_id = str(uuid.uuid4())
         def progress_sync(current, total):
             loop = asyncio.get_event_loop()
             asyncio.run_coroutine_threadsafe(_drive_download_progress(current, total, status_msg, task_id), loop)
-
         async def download():
             request = service.files().get_media(fileId=file_id)
             with open(temp_path, "wb") as f:
@@ -548,19 +525,16 @@ async def download_drive_file(client, message, service, file_id, filename, file_
         await client.send_document(
             chat_id=user_id,
             document=temp_path,
-            caption=f"✅ Downloaded from Drive: {safe_filename}\n📏 Size: {os.path.getsize(temp_path)/1e6:.2f} MB"
+            caption=f"✅ Downloaded from Drive: **{original_filename}**\n📏 Size: {os.path.getsize(temp_path)/1e6:.2f} MB"
         )
         await status_msg.delete()
         os.remove(temp_path)
     except asyncio.CancelledError:
         await status_msg.edit_text("❌ Download cancelled.")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if os.path.exists(temp_path): os.remove(temp_path)
     except Exception as e:
-        error_msg = str(e) if str(e) else "Unknown error"
-        await status_msg.edit_text(f"❌ Download failed: {error_msg}")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        await status_msg.edit_text(f"❌ Download failed: {str(e)}")
+        if os.path.exists(temp_path): os.remove(temp_path)
 
 @app.on_message(filters.command("getdrive"))
 async def getdrive_cmd(client, message):
@@ -596,8 +570,8 @@ async def getdrive_cmd(client, message):
         original_filename = file_meta.get("name", "file.bin")
         file_size = int(file_meta.get("size", 0))
         size_mb = file_size / 1e6
-        # Shorten for display in confirmation
-        display_name = shorten_filename(original_filename, max_total_len=50)
+        # Shorten display name for confirmation
+        display_name = original_filename[:50] + ("..." if len(original_filename) > 50 else "")
         if file_size > 50 * 1024 * 1024:
             token = str(uuid.uuid4())[:8]
             _download_pending[token] = {
@@ -620,9 +594,7 @@ async def getdrive_cmd(client, message):
         # Small file – download directly
         await download_drive_file(client, message, service, file_id, original_filename, file_size, status_msg)
     except Exception as e:
-        error_msg = str(e) if str(e) else "Unknown error"
-        await status_msg.edit_text(f"❌ Failed: {error_msg}")
-
+        await status_msg.edit_text(f"❌ Failed: {str(e)}")
 
 # ========== Callback Queries ==========
 @app.on_callback_query()
@@ -631,31 +603,26 @@ async def callback_handler(client, callback_query: CallbackQuery):
     data = callback_query.data
     user_id = callback_query.from_user.id
 
-    # Helper to safely edit message (skip if same text)
     async def safe_edit(msg, new_text, **kwargs):
         if msg.text != new_text:
             await msg.edit_text(new_text, **kwargs)
 
-    # Logout from a specific account
     if data.startswith("logout_"):
         email = data[7:]
         await remove_drive_account(user_id, email)
         await safe_edit(callback_query.message, f"✅ Logged out from {email}.")
 
-    # Set active drive account
     elif data.startswith("setdrive_"):
         email = data[9:]
         await users_col.update_one({"_id": user_id}, {"$set": {"active_drive": email}})
         await safe_edit(callback_query.message, f"✅ Default drive set to **{email}**.\nNow all uploads will go to this account.")
 
-    # Cancel an ongoing upload/download task
     elif data.startswith("cancel_"):
         task_id = data[7:]
         if user_id in user_tasks and task_id in user_tasks[user_id]:
             user_tasks[user_id][task_id].cancel()
             await safe_edit(callback_query.message, "❌ Operation cancelled.")
 
-    # Confirm large file download from Drive (short token)
     elif data.startswith("confirm_dl_"):
         token = data[11:]
         if token in _download_pending:
@@ -664,7 +631,6 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await safe_edit(callback_query.message, "❌ This confirmation is not for you.")
                 await callback_query.answer()
                 return
-            # Re‑create Drive service
             user = await get_user(user_id)
             active_email = info.get("active_email")
             service = await get_drive_service(user_id, active_email)
@@ -672,7 +638,6 @@ async def callback_handler(client, callback_query: CallbackQuery):
                 await safe_edit(callback_query.message, "Authentication failed. Please /log_in again.")
                 await callback_query.answer()
                 return
-            # Start the download
             await safe_edit(callback_query.message, "⏳ Starting download...")
             await download_drive_file(
                 client,
@@ -687,12 +652,10 @@ async def callback_handler(client, callback_query: CallbackQuery):
             await safe_edit(callback_query.message, "Invalid or expired confirmation. Please run /getdrive again.")
         await callback_query.answer()
 
-    # Cancel download (generic)
     elif data == "cancel_dl":
         await safe_edit(callback_query.message, "❌ Download cancelled.")
         await callback_query.answer()
 
-    # Cancel a specific download task (with task_id)
     elif data.startswith("cancel_dl_"):
         task_id = data[9:]
         if user_id in user_tasks and task_id in user_tasks[user_id]:
