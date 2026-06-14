@@ -32,18 +32,27 @@ async def get_drive_service(user_id):
         )
     return build("drive", "v3", credentials=creds)
 
-async def upload_file_to_drive(user_id, file_path, filename, folder_id=None, progress_callback=None, status_msg=None, status_msg_id=None):
+async def upload_file_to_drive(user_id, file_path, filename, folder_id=None, progress_callback=None):
+    """
+    Uploads a file to Google Drive.
+    progress_callback: async function(current, total) called during upload.
+    """
     service = await get_drive_service(user_id)
     if not service:
         return None, "Not authenticated. Use /login"
     
-    media = MediaFileUpload(file_path, resumable=True, chunksize=1024*1024*5)
-    if progress_callback:
-        media.set_progress_callback(
-            lambda current, total: asyncio.create_task(
-                progress_callback(current, total, status_msg, "📤 Uploading...")
-            )
-        )
+    # Create media with proper callback
+    def sync_callback(current, total):
+        # This runs in a thread; we need to schedule an async callback
+        if progress_callback:
+            asyncio.run_coroutine_threadsafe(progress_callback(current, total), asyncio.get_event_loop())
+    
+    media = MediaFileUpload(
+        file_path,
+        resumable=True,
+        chunksize=1024*1024*5,
+        callback=sync_callback   # <-- correct way
+    )
     file_metadata = {"name": filename}
     if folder_id:
         file_metadata["parents"] = [folder_id]
