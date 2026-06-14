@@ -1,10 +1,10 @@
 import asyncio
+import re
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from db.mongo import users_col
-import re
 
 def creds_to_dict(creds):
     return {
@@ -23,27 +23,31 @@ async def get_drive_service(user_id):
     creds_dict = user["drive_tokens"]
     creds = Credentials.from_authorized_user_info(creds_dict)
     if creds.expired and creds.refresh_token:
-        # Synchronous refresh – run in thread
         def refresh():
             creds.refresh(GoogleRequest())
         await asyncio.to_thread(refresh)
-        # Update DB
         await users_col.update_one(
             {"_id": user_id},
             {"$set": {"drive_tokens": creds_to_dict(creds)}}
         )
     return build("drive", "v3", credentials=creds)
 
-async def upload_file_to_drive(user_id, file_path, filename, folder_id=None):
+async def upload_file_to_drive(user_id, file_path, filename, folder_id=None, progress_callback=None, status_msg=None, status_msg_id=None):
     service = await get_drive_service(user_id)
     if not service:
         return None, "Not authenticated. Use /login"
-    media = MediaFileUpload(file_path, resumable=True)
+    
+    media = MediaFileUpload(file_path, resumable=True, chunksize=1024*1024*5)
+    if progress_callback:
+        media.set_progress_callback(
+            lambda current, total: asyncio.create_task(
+                progress_callback(current, total, status_msg, "📤 Uploading...")
+            )
+        )
     file_metadata = {"name": filename}
     if folder_id:
         file_metadata["parents"] = [folder_id]
     try:
-        # Run synchronous upload in thread
         def upload():
             return service.files().create(
                 body=file_metadata, media_body=media, fields="id, webViewLink"
