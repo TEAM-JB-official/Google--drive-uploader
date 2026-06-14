@@ -214,6 +214,16 @@ async def mydrives_cmd(client, message):
         text += f"{idx}. {email}\n"
     await message.reply(text)
 
+@app.on_message(filters.command("fix_my_email") & filters.user(ADMIN_IDS))
+async def fix_my_email_cmd(client, message):
+    user_id = message.from_user.id
+    from utils.drive import fix_missing_emails_for_user
+    count = await fix_missing_emails_for_user(user_id)
+    if count == 0:
+        await message.reply("No drive token without an email found, or all already have emails.")
+    else:
+        await message.reply(f"✅ Fixed {count} drive account(s). Now try /mydrives or /stats.")
+
 @app.on_message(filters.command("stats"))
 async def stats_cmd(client, message):
     user_id = message.from_user.id
