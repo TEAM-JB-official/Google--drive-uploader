@@ -1,3 +1,4 @@
+import aiohttp   # add this if not already present
 import asyncio
 import os
 import uuid
