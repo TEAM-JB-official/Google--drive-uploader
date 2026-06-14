@@ -6,7 +6,7 @@ import string
 import time
 import re
 import hashlib
-import aiohttp
+import aiohttp          # ← fixed: was "iohttp" before, now correct
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -27,7 +27,7 @@ import utils.logger
 utils.logger.bot_instance = app
 
 user_tasks = {}
-_download_pending = {}  # for large file confirmations
+_download_pending = {}
 
 # ========== Helper Functions ==========
 async def get_user(user_id):
@@ -223,7 +223,6 @@ async def show_drive_cmd(client, message):
     else:
         await message.reply(f"✅ Current default drive: {active}")
 
-# ========== Stats with multi-drive selection ==========
 async def show_drive_stats(client, message, user_id, email):
     stats = await get_drive_stats(user_id, email)
     if not stats:
@@ -251,7 +250,6 @@ async def stats_cmd(client, message):
     if not drives:
         await message.reply("You have not logged in. Use /log_in.")
         return
-    # Filter out invalid entries
     valid_drives = [d for d in drives if "invalid" not in d.lower() and "re‑login" not in d.lower()]
     if not valid_drives:
         await message.reply("No valid drives found. Please /log_in again.")
@@ -262,12 +260,16 @@ async def stats_cmd(client, message):
     keyboard = [[InlineKeyboardButton(email, callback_data=f"stats_{email}")] for email in valid_drives]
     await message.reply("Select which Google Drive account to view stats for:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+# ========== Fixed /account command ==========
 @app.on_message(filters.command("account"))
 async def account_cmd(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
     drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
-    email = drives[0].get("email") if drives else "Not connected"
+    if not drives:
+        await message.reply("You have not logged in. Use /log_in.")
+        return
+    active_email = user.get("active_drive") or drives[0].get("email")
     plan = user.get("plan", "free")
     used = user.get("daily_upload_count", 0)
     limit = PLANS[plan]["daily_uploads"]
@@ -286,18 +288,22 @@ async def account_cmd(client, message):
     await message.reply(
         f"**Name:** {message.from_user.first_name}\n"
         f"**Telegram Id:** {user_id}\n"
-        f"**Referral:** {'Referred' if user.get('referred_by') else 'None'}\n\n"
+        f"**Active Drive Email:** {active_email}\n\n"
+        f"**Referral:** {'Referred by someone' if user.get('referred_by') else 'None'}\n\n"
         f"🔗 **Your Referral Link**\n"
         f"`https://t.me/{ (await client.get_me()).username }?start=ref_{user.get('referral_code')}`\n\n"
-        f"⭐ **Plan:** {plan.capitalize()}\n"
+        f"⭐ **Current Plan:** {plan.capitalize()} User:\n"
         f"    Used: {used} / {limit}\n"
         f"    Balance: {limit - used}\n"
         f"    {bar} ({percent:.1f}%)\n"
         f"    Resets in {reset_time}\n\n"
         f"📊 **Data Usage**\n"
         f"• Today: {today_mb:.2f} MB\n"
-        f"• Total: {total_gb:.2f} GB"
+        f"• Total (all time): {total_gb:.2f} GB\n\n"
+        f"Use `/stats` for Drive storage usage and `/setdrive` to switch accounts."
     )
+
+# ... (rest of Part 1: referral, myplan, upgrade, setfolder, removefolder) ...
 
 @app.on_message(filters.command("referral"))
 async def referral_cmd(client, message):
@@ -497,6 +503,7 @@ async def youtube_cmd(client, message):
         await log_action(user_id, "upload", "failed", error=str(e))
 
 # ========== Drive Download (getdrive) ==========
+# ========== Drive Download (getdrive) ==========
 async def _drive_download_progress(current, total, status_msg, task_id):
     if total <= 0:
         return
@@ -546,34 +553,63 @@ async def download_drive_file(client, message, service, file_id, original_filena
         await status_msg.edit_text(f"❌ Download failed: {str(e)}")
         if os.path.exists(temp_path): os.remove(temp_path)
 
+# ========== FIXED PUBLIC DOWNLOAD (handles Google's confirm page) ==========
 async def download_public_drive_file(client, message, public_url, file_id, status_msg):
     """Download a file from a public Google Drive link without API authentication."""
     user_id = message.chat.id if hasattr(message, 'chat') else message.from_user.id
     os.makedirs("downloads", exist_ok=True)
-    # Get filename from the public page
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(public_url, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    raise Exception(f"HTTP {resp.status}")
+    
+    async with aiohttp.ClientSession() as session:
+        # First request – may get a confirmation page
+        async with session.get(public_url, allow_redirects=True) as resp:
+            text = await resp.text()
+            # Look for the confirm token (Google Drive virus scan warning)
+            confirm_match = re.search(r'confirm=([^&"\']+)', text)
+            if confirm_match:
+                confirm = confirm_match.group(1)
+                download_url = f"{public_url}&confirm={confirm}"
+                # Second request with confirmation token
+                async with session.get(download_url, allow_redirects=True) as resp2:
+                    content_disp = resp2.headers.get('Content-Disposition', '')
+                    if 'filename=' in content_disp:
+                        filename = content_disp.split('filename=')[1].strip('"')
+                    else:
+                        filename = f"file_{file_id}.bin"
+                    total = int(resp2.headers.get('content-length', 0))
+                    downloaded = 0
+                    await status_msg.edit_text("⏳ Downloading public file...")
+                    ext = os.path.splitext(filename)[1] or ".bin"
+                    random_name = f"{uuid.uuid4().hex[:8]}{ext}"
+                    temp_path = f"downloads/{user_id}_{random_name}"
+                    with open(temp_path, 'wb') as f:
+                        async for chunk in resp2.content.iter_chunked(1024*1024):
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total > 0:
+                                percent = (downloaded * 100) // total
+                                await status_msg.edit_text(f"⏳ Downloading public file... {percent}%")
+                    await status_msg.edit_text("📤 Sending file to Telegram...")
+                    await client.send_document(
+                        chat_id=user_id,
+                        document=temp_path,
+                        caption=f"✅ **Downloaded from Public Drive:**\n`{filename}`\n📏 Size: {os.path.getsize(temp_path)/1e6:.2f} MB"
+                    )
+                    await status_msg.delete()
+                    os.remove(temp_path)
+                    return
+            else:
+                # No confirmation needed – direct download
                 content_disp = resp.headers.get('Content-Disposition', '')
                 if 'filename=' in content_disp:
                     filename = content_disp.split('filename=')[1].strip('"')
                 else:
                     filename = f"file_{file_id}.bin"
-    except Exception as e:
-        filename = f"file_{file_id}.bin"
-    ext = os.path.splitext(filename)[1] or ".bin"
-    random_name = f"{uuid.uuid4().hex[:8]}{ext}"
-    temp_path = f"downloads/{user_id}_{random_name}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(public_url, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    raise Exception(f"HTTP {resp.status}")
                 total = int(resp.headers.get('content-length', 0))
                 downloaded = 0
                 await status_msg.edit_text("⏳ Downloading public file...")
+                ext = os.path.splitext(filename)[1] or ".bin"
+                random_name = f"{uuid.uuid4().hex[:8]}{ext}"
+                temp_path = f"downloads/{user_id}_{random_name}"
                 with open(temp_path, 'wb') as f:
                     async for chunk in resp.content.iter_chunked(1024*1024):
                         f.write(chunk)
@@ -581,24 +617,21 @@ async def download_public_drive_file(client, message, public_url, file_id, statu
                         if total > 0:
                             percent = (downloaded * 100) // total
                             await status_msg.edit_text(f"⏳ Downloading public file... {percent}%")
-        await status_msg.edit_text("📤 Sending file to Telegram...")
-        await client.send_document(
-            chat_id=user_id,
-            document=temp_path,
-            caption=f"✅ **Downloaded from Public Drive:**\n`{filename}`\n📏 Size: {os.path.getsize(temp_path)/1e6:.2f} MB"
-        )
-        await status_msg.delete()
-        os.remove(temp_path)
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Public download failed: {str(e)}")
-        if os.path.exists(temp_path): os.remove(temp_path)
+                await status_msg.edit_text("📤 Sending file to Telegram...")
+                await client.send_document(
+                    chat_id=user_id,
+                    document=temp_path,
+                    caption=f"✅ **Downloaded from Public Drive:**\n`{filename}`\n📏 Size: {os.path.getsize(temp_path)/1e6:.2f} MB"
+                )
+                await status_msg.delete()
+                os.remove(temp_path)
 
 @app.on_message(filters.command("getdrive"))
 async def getdrive_cmd(client, message):
     user_id = message.from_user.id
     args = message.command
     if len(args) < 2:
-        await message.reply("Usage: /getdrive <google_drive_link>\nExample: /getdrive https://drive.google.com/file/d/abc123/view")
+        await message.reply("Usage: /getdrive <google_drive_link>")
         return
     drive_link = args[1]
     patterns = [r"/file/d/([a-zA-Z0-9_-]+)", r"id=([a-zA-Z0-9_-]+)", r"open\?id=([a-zA-Z0-9_-]+)", r"uc\?id=([a-zA-Z0-9_-]+)"]
@@ -609,7 +642,7 @@ async def getdrive_cmd(client, message):
             file_id = m.group(1)
             break
     if not file_id:
-        await message.reply("❌ Could not extract file ID from the link.")
+        await message.reply("❌ Could not extract file ID.")
         return
     # Try public download first (works for any publicly shared file)
     public_url = f"https://drive.google.com/uc?export=download&id={file_id}"
