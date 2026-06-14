@@ -12,14 +12,16 @@ app = FastAPI()
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 BASE_DOMAIN = DOMAIN.rstrip('/') if DOMAIN else ""
 
-# Try to import add_drive_account; if fails, define a dummy
+# Try to import add_drive_account; if it fails, print the error
 try:
     from utils.drive import add_drive_account
-except ImportError as e:
-    print(f"WARNING: Could not import add_drive_account: {e}")
+    print("✅ add_drive_account imported successfully")
+except Exception as e:
+    print(f"❌ Failed to import add_drive_account: {e}")
+    traceback.print_exc()
+    # Fallback definition (should never be needed if drive.py is correct)
     async def add_drive_account(user_id, creds_dict, email):
-        print(f"Falling back: would add account for {user_id} with email {email}")
-        # Directly store in DB as fallback
+        print(f"FALLBACK: adding account for {user_id} with email {email}")
         user = await users_col.find_one({"_id": user_id})
         if not user:
             await users_col.insert_one({"_id": user_id, "drive_tokens": []})
@@ -66,8 +68,8 @@ async def auth_login(user_id: int, action: str = "add"):
         return RedirectResponse(auth_url)
     except Exception as e:
         print(f"Login error: {e}")
-        print(traceback.format_exc())
-        raise HTTPException(500, f"Internal error: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(500, f"Login error: {str(e)}")
 
 @app.get("/auth/callback")
 async def auth_callback(code: str, state: str = None):
@@ -111,8 +113,8 @@ async def auth_callback(code: str, state: str = None):
         return RedirectResponse(url=f"{BASE_DOMAIN}/success.html")
     except Exception as e:
         print(f"Callback error: {e}")
-        print(traceback.format_exc())
-        raise HTTPException(500, f"Internal error: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(500, f"Callback error: {str(e)}")
 
 @app.get("/health")
 async def health():
