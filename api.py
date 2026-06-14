@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 import requests
-from config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, REDIRECT_URI, DOMAIN
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, REDIRECT_URI, DOMAIN, API_ID, API_HASH, BOT_TOKEN
 from db.mongo import users_col
 from utils.drive import add_drive_account
 
@@ -12,16 +14,25 @@ BASE_DOMAIN = DOMAIN.rstrip('/') if DOMAIN else ""
 async def success_page():
     return """
     <!DOCTYPE html>
-    <html><head><title>Success</title></head>
+    <html>
+    <head>
+        <title>Authentication Successful</title>
+        <script>
+            setTimeout(function() {
+                window.close();
+            }, 3000);
+        </script>
+    </head>
     <body style="text-align:center;background:#4CAF50;color:white;padding:50px">
         <h1>✅ Authentication Successful</h1>
         <p>You may close this window and return to Telegram.</p>
-    </body></html>
+        <p>This window will close automatically in 3 seconds...</p>
+    </body>
+    </html>
     """
 
 @app.get("/auth/login")
 async def auth_login(user_id: int, action: str = "add"):
-    # Build Google OAuth URL manually
     params = {
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": REDIRECT_URI,
@@ -46,7 +57,7 @@ async def auth_callback(code: str, state: str = None):
     except:
         raise HTTPException(400, "Invalid state")
 
-    # Exchange code for token using direct POST
+    # Exchange code for token
     data = {
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
@@ -67,18 +78,21 @@ async def auth_callback(code: str, state: str = None):
         "scopes": ["https://www.googleapis.com/auth/drive.file"],
     }
 
-    # Get user email
-    headers = {"Authorization": f"Bearer {token_info['access_token']}"}
-    userinfo = requests.get("https://www.googleapis.com/oauth2/v1/userinfo", headers=headers).json()
-    email = userinfo.get("email")
+    # Get user email from Drive API
+    try:
+        creds = Credentials.from_authorized_user_info(creds_dict)
+        service = build("drive", "v3", credentials=creds)
+        about = service.about().get(fields="user").execute()
+        email = about["user"]["emailAddress"]
+    except Exception as e:
+        raise HTTPException(500, f"Failed to fetch email: {str(e)}")
 
     if action == "add":
         await add_drive_account(user_id, creds_dict, email)
 
-    # ---------- Send Telegram success message ----------
+    # Send Telegram success message
     try:
         from pyrogram import Client
-        from config import API_ID, API_HASH, BOT_TOKEN
         async with Client("temp_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN) as temp_bot:
             user = await temp_bot.get_users(user_id)
             first_name = user.first_name
