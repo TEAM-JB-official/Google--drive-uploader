@@ -9,10 +9,10 @@ from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_IDS, DOMAIN, PLANS
 from db.mongo import users_col, logs_col
-from utils.limits import check_quota, get_remaining_uploads, is_premium_active
+from utils.limits import check_quota, get_remaining_uploads
 from utils.drive import (
     get_drive_service, get_drive_stats, add_drive_account, remove_drive_account,
-    get_user_drives, upload_file_to_drive, validate_folder, migrate_old_tokens
+    get_user_drives, upload_file_to_drive, validate_folder, clean_invalid_tokens, count_valid_drives
 )
 from utils.queue import add_to_queue, cancel_user_task
 from utils.logger import log_action, bot_instance as logger_bot
@@ -22,7 +22,6 @@ app = Client("gdrive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN
 import utils.logger
 utils.logger.bot_instance = app
 
-# Store active tasks for cancellation
 user_tasks = {}
 
 # ========== Helper Functions ==========
@@ -36,7 +35,7 @@ async def get_user(user_id):
             "premium_expiry": None,
             "daily_upload_count": 0,
             "last_reset_date": None,
-            "drive_tokens": [],          # list of {email, token} dicts
+            "drive_tokens": [],
             "active_drive": None,
             "custom_folder_id": None,
             "referral_code": referral_code,
@@ -46,12 +45,20 @@ async def get_user(user_id):
         })
         user = await users_col.find_one({"_id": user_id})
     else:
-        # Migrate old tokens (strings) to new format
-        await migrate_old_tokens(user_id)
+        await clean_invalid_tokens(user_id)  # remove corrupted entries
         user = await users_col.find_one({"_id": user_id})
     return user
 
-async def progress_callback(current, total, status_msg, text, task_id=None):
+def make_safe_progress_callback(status_msg, text, task_id):
+    loop = asyncio.get_event_loop()
+    def progress_sync(current, total):
+        asyncio.run_coroutine_threadsafe(
+            _progress_coro(current, total, status_msg, text, task_id),
+            loop
+        )
+    return progress_sync
+
+async def _progress_coro(current, total, status_msg, text, task_id):
     percent = (current * 100) // total if total else 0
     bar = "█" * (percent // 10) + "░" * (10 - (percent // 10))
     try:
@@ -60,11 +67,8 @@ async def progress_callback(current, total, status_msg, text, task_id=None):
     except:
         pass
 
-def format_time(seconds):
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+async def progress_callback(current, total, status_msg, text, task_id=None):
+    await _progress_coro(current, total, status_msg, text, task_id)
 
 def format_storage_bar(used_gb, total_gb):
     percent = (used_gb / total_gb) * 100 if total_gb else 0
@@ -84,7 +88,7 @@ def get_quota_reset_time(user):
     delta = reset_dt - datetime.utcnow()
     return str(timedelta(seconds=delta.total_seconds())).split('.')[0]
 
-# ========== User Commands ==========
+# ========== User Commands (part 1) ==========
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message: Message):
     user_id = message.from_user.id
@@ -160,10 +164,13 @@ async def login_cmd(client, message):
     user = await get_user(user_id)
     plan = user.get("plan", "free")
     max_accounts = PLANS[plan]["accounts"]
-    # count current accounts (only dict format)
-    current_accounts = len([d for d in user.get("drive_tokens", []) if isinstance(d, dict)])
-    if current_accounts >= max_accounts:
-        await message.reply(f"❌ You cannot add more accounts. Your {plan} plan allows only {max_accounts} saved drive(s).")
+    valid_count = await count_valid_drives(user_id)
+    if valid_count >= max_accounts:
+        await message.reply(
+            f"❌ You already have {max_accounts} valid Google Drive accounts.\n"
+            f"Use `/log_out` to remove one, or upgrade your plan.\n"
+            f"Your plan: **{plan.upper()}** (max {max_accounts} accounts)."
+        )
         return
     domain = DOMAIN.rstrip('/')
     auth_url = f"{domain}/auth/login?user_id={user_id}&action=add"
@@ -215,8 +222,7 @@ async def stats_cmd(client, message):
         await message.reply("You have not logged in. Use /help to know how to log in.")
         return
     email = drives[0]
-    # Check for invalid token messages
-    if any(key in email.lower() for key in ["invalid", "re‑login", "old token"]):
+    if "invalid" in email.lower() or "re‑login" in email.lower() or "old token" in email.lower():
         await message.reply("❌ Your stored Google Drive token is invalid or expired.\nPlease use /log_in again to re‑authenticate.")
         return
     stats = await get_drive_stats(user_id, email)
@@ -242,7 +248,6 @@ async def stats_cmd(client, message):
 async def account_cmd(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-    # Get only dict‑formatted drives
     drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     email = drives[0].get("email") if drives else "Not connected"
     plan = user.get("plan", "free")
@@ -254,7 +259,6 @@ async def account_cmd(client, message):
     async for log in logs_col.find({"user_id": user_id, "action": "upload", "status": "success"}):
         total_transferred_bytes += log.get("size_mb", 0) * 1024 * 1024
     total_transferred_gb = total_transferred_bytes / (1024**3)
-    today_used_mb = 0  # would need per‑upload size tracking
     await message.reply(
         f"**Name:** {message.from_user.first_name}\n"
         f"**Telegram Id:** {user_id}\n"
@@ -268,7 +272,7 @@ async def account_cmd(client, message):
         f"    {bar} ({percent:.1f}%)\n\n"
         f"    Your quota will reset in {reset_time}.\n\n"
         f"📊 **Data Usage**\n"
-        f"• Today: {today_used_mb:.2f} MB\n"
+        f"• Today: 0.00 MB\n"
         f"• Total (since {user.get('created_at', datetime.utcnow()).strftime('%Y-%m-%d')}): {total_transferred_gb:.2f} GB"
     )
 
@@ -381,7 +385,6 @@ async def handle_file(client, message):
     if not allowed:
         await message.reply(msg)
         return
-    # For now, use first drive as active
     folder_id = user.get("custom_folder_id")
     await process_file_upload(client, message, user, folder_id)
 
@@ -392,12 +395,11 @@ async def process_file_upload(client, message, user, folder_id):
     temp_path = f"downloads/{user_id}_{uuid.uuid4()}.tmp"
     try:
         task_id = str(uuid.uuid4())
+        safe_progress = make_safe_progress_callback(status_msg, "⏳ Downloading file...", task_id)
         file_path = await client.download_media(
             message,
             file_name=temp_path,
-            progress=lambda c, t: asyncio.create_task(
-                progress_callback(c, t, status_msg, "⏳ Downloading file...", task_id)
-            )
+            progress=safe_progress
         )
         user_tasks.setdefault(user_id, {})[task_id] = asyncio.current_task()
         # Get file details
@@ -431,6 +433,7 @@ async def process_file_upload(client, message, user, folder_id):
         await status_msg.edit_text(f"❌ Download failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
 
+# ========== Continue from Part 1 ==========
 @app.on_message(filters.command("upload"))
 async def upload_url_cmd(client, message):
     user_id = message.from_user.id
@@ -457,7 +460,7 @@ async def upload_url_cmd(client, message):
     try:
         task_id = str(uuid.uuid4())
         user_tasks.setdefault(user_id, {})[task_id] = asyncio.current_task()
-        await download_http(url, file_path, progress_callback, status_msg, "⏳ Downloading from URL...", task_id)
+        await download_http(url, file_path, make_safe_progress_callback(status_msg, "⏳ Downloading from URL...", task_id))
         size_mb = os.path.getsize(file_path) / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
         add_to_queue(user_id, file_path, safe_filename, folder_id, status_msg.edit_text)
@@ -494,7 +497,7 @@ async def youtube_cmd(client, message):
     try:
         task_id = str(uuid.uuid4())
         user_tasks.setdefault(user_id, {})[task_id] = asyncio.current_task()
-        final_path = await download_youtube(url, temp_template, progress_callback, status_msg, task_id)
+        final_path = await download_youtube(url, temp_template, make_safe_progress_callback(status_msg, "⏳ Downloading YouTube...", task_id))
         filename = os.path.basename(final_path)
         size_mb = os.path.getsize(final_path) / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
@@ -523,6 +526,27 @@ async def callback_handler(client, callback_query: CallbackQuery):
     await callback_query.answer()
 
 # ========== Admin Commands ==========
+def parse_duration(duration_str):
+    duration_str = duration_str.lower().strip()
+    parts = duration_str.split()
+    if len(parts) != 2:
+        return None
+    try:
+        value = int(parts[0])
+    except:
+        return None
+    unit = parts[1]
+    if unit in ['day', 'days']:
+        return timedelta(days=value)
+    elif unit in ['week', 'weeks']:
+        return timedelta(weeks=value)
+    elif unit in ['month', 'months']:
+        return timedelta(days=value*30)
+    elif unit in ['year', 'years']:
+        return timedelta(days=value*365)
+    else:
+        return None
+
 @app.on_message(filters.command("add") & filters.user(ADMIN_IDS))
 async def add_premium_cmd(client, message):
     args = message.text.split()
@@ -606,28 +630,6 @@ async def broadcast_cmd(client, message):
         except:
             pass
     await message.reply(f"Broadcast sent to {count} users.")
-
-# Helper for duration parsing
-def parse_duration(duration_str):
-    duration_str = duration_str.lower().strip()
-    parts = duration_str.split()
-    if len(parts) != 2:
-        return None
-    try:
-        value = int(parts[0])
-    except:
-        return None
-    unit = parts[1]
-    if unit in ['day', 'days']:
-        return timedelta(days=value)
-    elif unit in ['week', 'weeks']:
-        return timedelta(weeks=value)
-    elif unit in ['month', 'months']:
-        return timedelta(days=value*30)
-    elif unit in ['year', 'years']:
-        return timedelta(days=value*365)
-    else:
-        return None
 
 if __name__ == "__main__":
     app.run()
