@@ -160,13 +160,14 @@ async def privacy_cmd(client, message):
 
 @app.on_message(filters.command("log_in"))
 async def login_cmd(client, message):
+    status_msg = await message.reply("Getting your Sign In URL. Please Wait...")
     user_id = message.from_user.id
     user = await get_user(user_id)
     plan = user.get("plan", "free")
     max_accounts = PLANS[plan]["accounts"]
     valid_count = await count_valid_drives(user_id)
     if valid_count >= max_accounts:
-        await message.reply(
+        await status_msg.edit_text(
             f"❌ You already have {max_accounts} valid Google Drive accounts.\n"
             f"Use `/log_out` to remove one, or upgrade your plan.\n"
             f"Your plan: **{plan.upper()}** (max {max_accounts} accounts)."
@@ -175,7 +176,7 @@ async def login_cmd(client, message):
     domain = DOMAIN.rstrip('/')
     auth_url = f"{domain}/auth/login?user_id={user_id}&action=add"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔐 Authorize Google Drive", url=auth_url)]])
-    await message.reply(
+    await status_msg.edit_text(
         "Open the login page URL, click Sign in with Google, select your Google account, read the privacy policy, and give access.\n\n"
         "**Note:** This is a unique URL, only you can/should use this. If you generate new Sign In URL, this URL will not be valid anymore!\n"
         "If the button does not work, [click here]({})".format(auth_url),
