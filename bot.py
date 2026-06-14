@@ -45,7 +45,7 @@ async def get_user(user_id):
         })
         user = await users_col.find_one({"_id": user_id})
     else:
-        await clean_invalid_tokens(user_id)  # remove corrupted entries
+        await clean_invalid_tokens(user_id)
         user = await users_col.find_one({"_id": user_id})
     return user
 
@@ -88,7 +88,7 @@ def get_quota_reset_time(user):
     delta = reset_dt - datetime.utcnow()
     return str(timedelta(seconds=delta.total_seconds())).split('.')[0]
 
-# ========== User Commands (part 1) ==========
+# ========== User Commands (Part 1) ==========
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message: Message):
     user_id = message.from_user.id
@@ -118,7 +118,7 @@ async def start_cmd(client, message: Message):
         "1️⃣ Get your Sign In link from /log_in.\n"
         "2️⃣ Open the link → Sign in with your Google Account → Allow access. That’s it! 🤠\n\n"
         "✨ You can link multiple Google Drive accounts using the same method.\n"
-        "✨ Switch between accounts using /mygdrives.\n"
+        "✨ Switch between accounts using /setdrive.\n"
         "✨ Log out using /log_out.\n\n"
         "📤 **How to Use the Bot**\n"
         "➤ **Uploading Telegram Files**\nJust forward/send any Telegram file, and I’ll upload it automatically.\n\n"
@@ -133,7 +133,9 @@ async def start_cmd(client, message: Message):
         "🗑 /removefolder – Remove upload folder\n"
         "🔒 /privacy – Privacy policy\n"
         "🚪 /log_out – Logout from a Drive account\n"
-        "📂 /mydrives – List linked Drive accounts"
+        "📂 /mydrives – List linked Drive accounts\n"
+        "🔄 /setdrive – Choose which Drive account to upload to\n"
+        "🔍 /showdrive – Show current active Drive account"
     )
 
 @app.on_message(filters.command("help"))
@@ -142,6 +144,8 @@ async def help_cmd(client, message):
 /log_in – Connect a Google Drive account
 /log_out – Remove a linked account
 /mydrives – List your linked accounts
+/setdrive – Choose which Drive account to use for uploads
+/showdrive – Show current active Drive account
 /upload <url> [filename] – Upload from direct link
 /yt <YouTube URL> – Download & upload YouTube video
 /setfolder <folder_url> – Default upload folder
@@ -214,6 +218,32 @@ async def mydrives_cmd(client, message):
         text += f"{idx}. {email}\n"
     await message.reply(text)
 
+@app.on_message(filters.command("setdrive"))
+async def set_drive_cmd(client, message):
+    user_id = message.from_user.id
+    drives = await get_user_drives(user_id)
+    if not drives:
+        await message.reply("You have no linked accounts. Use /log_in first.")
+        return
+    if len(drives) == 1:
+        await users_col.update_one({"_id": user_id}, {"$set": {"active_drive": drives[0]}})
+        await message.reply(f"✅ Default drive set to {drives[0]}")
+        return
+    keyboard = []
+    for email in drives:
+        keyboard.append([InlineKeyboardButton(email, callback_data=f"setdrive_{email}")])
+    await message.reply("Select which Google Drive to use for uploads:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+@app.on_message(filters.command("showdrive"))
+async def show_drive_cmd(client, message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    active = user.get("active_drive")
+    if not active:
+        await message.reply("No default drive set. Use /setdrive to choose one.")
+    else:
+        await message.reply(f"✅ Current default drive: {active}")
+
 @app.on_message(filters.command("fix_my_email") & filters.user(ADMIN_IDS))
 async def fix_my_email_cmd(client, message):
     user_id = message.from_user.id
@@ -269,7 +299,6 @@ async def account_cmd(client, message):
     bar, percent = format_storage_bar(used, limit)
     reset_time = get_quota_reset_time(user)
 
-    # Today's uploaded MB
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     pipeline_today = [
         {"$match": {
@@ -283,7 +312,6 @@ async def account_cmd(client, message):
     result_today = await logs_col.aggregate(pipeline_today).to_list(length=1)
     today_mb = result_today[0]["total_mb"] if result_today else 0
 
-    # Total uploaded MB (all time)
     pipeline_total = [
         {"$match": {"user_id": user_id, "action": "upload", "status": "success"}},
         {"$group": {"_id": None, "total_mb": {"$sum": "$size_mb"}}}
@@ -384,17 +412,6 @@ async def upgrade_cmd(client, message):
     else:
         await message.reply("No reward days available. Invite friends using /referral to earn premium.")
 
-
-@app.on_message(filters.command("test_log") & filters.user(ADMIN_IDS))
-async def test_log_cmd(client, message):
-    from config import LOG_CHANNEL
-    try:
-        await client.send_message(LOG_CHANNEL, "✅ Test message")
-        await message.reply("Log channel works!")
-    except Exception as e:
-        await message.reply(f"Error: {e}\nCheck: LOG_CHANNEL={LOG_CHANNEL}, bot must be admin.")
-
-
 @app.on_message(filters.command("setfolder"))
 async def set_folder_cmd(client, message):
     user_id = message.from_user.id
@@ -417,21 +434,6 @@ async def remove_folder_cmd(client, message):
     await message.reply("✅ Custom folder removed. Uploads go to Drive root.")
 
 # ========== File Upload Handlers ==========
-@app.on_message(filters.document | filters.video | filters.audio | filters.photo | filters.voice)
-async def handle_file(client, message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
-    if not drives:
-        await message.reply("You have not logged in. Use /help to know how to log in.")
-        return
-    allowed, msg = await check_quota(user_id)
-    if not allowed:
-        await message.reply(msg)
-        return
-    folder_id = user.get("custom_folder_id")
-    await process_file_upload(client, message, user, folder_id)
-
 async def process_file_upload(client, message, user, folder_id):
     user_id = message.from_user.id
     status_msg = await message.reply("⏳ Downloading file...")
@@ -467,7 +469,9 @@ async def process_file_upload(client, message, user, folder_id):
             file_size = 0
         size_mb = file_size / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
-        add_to_queue(user_id, file_path, filename, folder_id, status_msg.edit_text)
+        # Get active drive email (if set)
+        active_email = user.get("active_drive")
+        add_to_queue(user_id, file_path, filename, folder_id, status_msg.edit_text, email=active_email)
         await log_action(user_id, "upload", "queued", filename, size_mb)
     except asyncio.CancelledError:
         await status_msg.edit_text("❌ Upload cancelled.")
@@ -477,7 +481,21 @@ async def process_file_upload(client, message, user, folder_id):
         await status_msg.edit_text(f"❌ Download failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
 
-# ========== Continue from Part 1 ==========
+@app.on_message(filters.document | filters.video | filters.audio | filters.photo | filters.voice)
+async def handle_file(client, message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
+    if not drives:
+        await message.reply("You have not logged in. Use /help to know how to log in.")
+        return
+    allowed, msg = await check_quota(user_id)
+    if not allowed:
+        await message.reply(msg)
+        return
+    folder_id = user.get("custom_folder_id")
+    await process_file_upload(client, message, user, folder_id)
+
 @app.on_message(filters.command("upload"))
 async def upload_url_cmd(client, message):
     user_id = message.from_user.id
@@ -507,7 +525,8 @@ async def upload_url_cmd(client, message):
         await download_http(url, file_path, make_safe_progress_callback(status_msg, "⏳ Downloading from URL...", task_id))
         size_mb = os.path.getsize(file_path) / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
-        add_to_queue(user_id, file_path, safe_filename, folder_id, status_msg.edit_text)
+        active_email = user.get("active_drive")
+        add_to_queue(user_id, file_path, safe_filename, folder_id, status_msg.edit_text, email=active_email)
         await log_action(user_id, "upload", "queued", safe_filename, size_mb)
     except asyncio.CancelledError:
         await status_msg.edit_text("❌ Upload cancelled.")
@@ -545,7 +564,8 @@ async def youtube_cmd(client, message):
         filename = os.path.basename(final_path)
         size_mb = os.path.getsize(final_path) / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
-        add_to_queue(user_id, final_path, filename, folder_id, status_msg.edit_text)
+        active_email = user.get("active_drive")
+        add_to_queue(user_id, final_path, filename, folder_id, status_msg.edit_text, email=active_email)
         await log_action(user_id, "upload", "queued", filename, size_mb)
     except asyncio.CancelledError:
         await status_msg.edit_text("❌ Upload cancelled.")
@@ -562,6 +582,10 @@ async def callback_handler(client, callback_query: CallbackQuery):
         email = data[7:]
         await remove_drive_account(user_id, email)
         await callback_query.message.edit_text(f"✅ Logged out from {email}.")
+    elif data.startswith("setdrive_"):
+        email = data[9:]
+        await users_col.update_one({"_id": user_id}, {"$set": {"active_drive": email}})
+        await callback_query.message.edit_text(f"✅ Default drive set to {email}.\nNow all uploads will go to this account.")
     elif data.startswith("cancel_"):
         task_id = data[7:]
         if user_id in user_tasks and task_id in user_tasks[user_id]:
