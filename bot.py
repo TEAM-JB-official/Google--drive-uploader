@@ -215,8 +215,9 @@ async def stats_cmd(client, message):
         await message.reply("You have not logged in. Use /help to know how to log in.")
         return
     email = drives[0]
-    if email == "Unknown (old token)":
-        await message.reply("Your old login token is invalid. Please use /log_in again.")
+    # Check for invalid token messages
+    if any(key in email.lower() for key in ["invalid", "re‑login", "old token"]):
+        await message.reply("❌ Your stored Google Drive token is invalid or expired.\nPlease use /log_in again to re‑authenticate.")
         return
     stats = await get_drive_stats(user_id, email)
     if not stats:
