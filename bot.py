@@ -384,6 +384,17 @@ async def upgrade_cmd(client, message):
     else:
         await message.reply("No reward days available. Invite friends using /referral to earn premium.")
 
+
+@app.on_message(filters.command("test_log") & filters.user(ADMIN_IDS))
+async def test_log_cmd(client, message):
+    from config import LOG_CHANNEL
+    try:
+        await client.send_message(LOG_CHANNEL, "✅ Test message")
+        await message.reply("Log channel works!")
+    except Exception as e:
+        await message.reply(f"Error: {e}\nCheck: LOG_CHANNEL={LOG_CHANNEL}, bot must be admin.")
+
+
 @app.on_message(filters.command("setfolder"))
 async def set_folder_cmd(client, message):
     user_id = message.from_user.id
