@@ -12,7 +12,7 @@ from db.mongo import users_col, logs_col
 from utils.limits import check_quota, get_remaining_uploads, is_premium_active
 from utils.drive import (
     get_drive_service, get_drive_stats, add_drive_account, remove_drive_account,
-    get_user_drives, upload_file_to_drive, validate_folder
+    get_user_drives, upload_file_to_drive, validate_folder, migrate_old_tokens
 )
 from utils.queue import add_to_queue, cancel_user_task
 from utils.logger import log_action, bot_instance as logger_bot
@@ -36,14 +36,18 @@ async def get_user(user_id):
             "premium_expiry": None,
             "daily_upload_count": 0,
             "last_reset_date": None,
-            "drive_tokens": [],          # list of {email, token}
-            "active_drive": None,        # email of active account
+            "drive_tokens": [],          # list of {email, token} dicts
+            "active_drive": None,
             "custom_folder_id": None,
             "referral_code": referral_code,
             "referred_by": None,
             "referral_rewards": 0,
             "created_at": datetime.utcnow()
         })
+        user = await users_col.find_one({"_id": user_id})
+    else:
+        # Migrate old tokens (strings) to new format
+        await migrate_old_tokens(user_id)
         user = await users_col.find_one({"_id": user_id})
     return user
 
@@ -74,7 +78,6 @@ def get_quota_reset_time(user):
         return "calculating..."
     today = datetime.utcnow().date().isoformat()
     if last_reset == today:
-        # reset at midnight UTC
         reset_dt = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     else:
         reset_dt = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -157,7 +160,8 @@ async def login_cmd(client, message):
     user = await get_user(user_id)
     plan = user.get("plan", "free")
     max_accounts = PLANS[plan]["accounts"]
-    current_accounts = len(user.get("drive_tokens", []))
+    # count current accounts (only dict format)
+    current_accounts = len([d for d in user.get("drive_tokens", []) if isinstance(d, dict)])
     if current_accounts >= max_accounts:
         await message.reply(f"❌ You cannot add more accounts. Your {plan} plan allows only {max_accounts} saved drive(s).")
         return
@@ -176,7 +180,7 @@ async def login_cmd(client, message):
 async def logout_cmd(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-    drives = user.get("drive_tokens", [])
+    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     if not drives:
         await message.reply("You have no linked Google accounts.")
         return
@@ -210,8 +214,10 @@ async def stats_cmd(client, message):
     if not drives:
         await message.reply("You have not logged in. Use /help to know how to log in.")
         return
-    # use first account for stats (or we could let user choose)
     email = drives[0]
+    if email == "Unknown (old token)":
+        await message.reply("Your old login token is invalid. Please use /log_in again.")
+        return
     stats = await get_drive_stats(user_id, email)
     if not stats:
         await message.reply("Failed to fetch Drive stats. Make sure your token is valid.")
@@ -235,20 +241,19 @@ async def stats_cmd(client, message):
 async def account_cmd(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-    drives = user.get("drive_tokens", [])
+    # Get only dict‑formatted drives
+    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     email = drives[0].get("email") if drives else "Not connected"
     plan = user.get("plan", "free")
     used = user.get("daily_upload_count", 0)
     limit = PLANS[plan]["daily_uploads"]
     bar, percent = format_storage_bar(used, limit)
     reset_time = get_quota_reset_time(user)
-    # total transferred (sum of all successful uploads)
     total_transferred_bytes = 0
     async for log in logs_col.find({"user_id": user_id, "action": "upload", "status": "success"}):
         total_transferred_bytes += log.get("size_mb", 0) * 1024 * 1024
     total_transferred_gb = total_transferred_bytes / (1024**3)
-    # today's transferred (approximate from daily_upload_count, but we don't have per-upload sizes)
-    today_used_mb = 0
+    today_used_mb = 0  # would need per‑upload size tracking
     await message.reply(
         f"**Name:** {message.from_user.first_name}\n"
         f"**Telegram Id:** {user_id}\n"
@@ -367,7 +372,7 @@ async def remove_folder_cmd(client, message):
 async def handle_file(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-    drives = user.get("drive_tokens", [])
+    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     if not drives:
         await message.reply("You have not logged in. Use /help to know how to log in.")
         return
@@ -375,21 +380,9 @@ async def handle_file(client, message):
     if not allowed:
         await message.reply(msg)
         return
-    # Ask for folder choice
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📁 Default folder", callback_data="upload_default")],
-        [InlineKeyboardButton("📂 Custom folder", callback_data="upload_custom")]
-    ])
-    await message.reply("Now select one option.", reply_markup=kb)
-    # Store the message for later processing
-    async def store_choice(choice):
-        if choice == "default":
-            folder_id = user.get("custom_folder_id")
-        else:
-            folder_id = None  # will ask for folder URL later
-        # proceed with upload
-        await process_file_upload(client, message, user, folder_id)
-    # We'll handle in callback; for simplicity, I'll add the callback handler below.
+    # For now, use first drive as active
+    folder_id = user.get("custom_folder_id")
+    await process_file_upload(client, message, user, folder_id)
 
 async def process_file_upload(client, message, user, folder_id):
     user_id = message.from_user.id
@@ -447,7 +440,8 @@ async def upload_url_cmd(client, message):
     url = args[1]
     filename = args[2] if len(args) > 2 else url.split('/')[-1].split('?')[0] or "file"
     user = await get_user(user_id)
-    if not user.get("drive_tokens"):
+    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
+    if not drives:
         await message.reply("You have not logged in. Use /help to know how to log in.")
         return
     allowed, msg = await check_quota(user_id)
@@ -484,7 +478,8 @@ async def youtube_cmd(client, message):
         return
     url = args[1]
     user = await get_user(user_id)
-    if not user.get("drive_tokens"):
+    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
+    if not drives:
         await message.reply("You have not logged in. Use /help to know how to log in.")
         return
     allowed, msg = await check_quota(user_id)
@@ -506,9 +501,6 @@ async def youtube_cmd(client, message):
         await log_action(user_id, "upload", "queued", filename, size_mb)
     except asyncio.CancelledError:
         await status_msg.edit_text("❌ Upload cancelled.")
-        if os.path.exists(temp_template.split('_')[0] + '*'):
-            # clean up yt-dlp files is tricky; skip for simplicity
-            pass
     except Exception as e:
         await status_msg.edit_text(f"❌ YouTube download failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
@@ -527,16 +519,6 @@ async def callback_handler(client, callback_query: CallbackQuery):
         if user_id in user_tasks and task_id in user_tasks[user_id]:
             user_tasks[user_id][task_id].cancel()
             await callback_query.message.edit_text("❌ Operation cancelled.")
-    elif data == "upload_default":
-        user = await get_user(user_id)
-        folder_id = user.get("custom_folder_id")
-        await callback_query.message.edit_text("Uploading with default folder...")
-        # We need to retrieve the original message that triggered this callback
-        # For simplicity, we assume the file message is stored in a temporary dict
-        # This is a placeholder – you need to implement proper state storage
-        await callback_query.answer("Feature in progress: default folder upload. Please send the file again.")
-    elif data == "upload_custom":
-        await callback_query.message.edit_text("Please use /setfolder to set a custom folder first, then try again.")
     await callback_query.answer()
 
 # ========== Admin Commands ==========
