@@ -45,6 +45,7 @@ async def auth_callback(code: str, state: str = None):
         action = parts[1] if len(parts) > 1 else "add"
     except:
         raise HTTPException(400, "Invalid state")
+
     # Exchange code for token using direct POST
     data = {
         "client_id": GOOGLE_CLIENT_ID,
@@ -65,12 +66,31 @@ async def auth_callback(code: str, state: str = None):
         "client_secret": GOOGLE_CLIENT_SECRET,
         "scopes": ["https://www.googleapis.com/auth/drive.file"],
     }
+
     # Get user email
     headers = {"Authorization": f"Bearer {token_info['access_token']}"}
     userinfo = requests.get("https://www.googleapis.com/oauth2/v1/userinfo", headers=headers).json()
     email = userinfo.get("email")
+
     if action == "add":
         await add_drive_account(user_id, creds_dict, email)
+
+    # ---------- Send Telegram success message ----------
+    try:
+        from pyrogram import Client
+        from config import API_ID, API_HASH, BOT_TOKEN
+        async with Client("temp_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN) as temp_bot:
+            user = await temp_bot.get_users(user_id)
+            first_name = user.first_name
+            await temp_bot.send_message(
+                user_id,
+                f"**Hi {first_name}**\n\n"
+                f"Sign In was successful!\n\n"
+                f"You've successfully linked your (**{email}**) Google Drive."
+            )
+    except Exception as e:
+        print(f"Could not send login success message: {e}")
+
     return RedirectResponse(url=f"{BASE_DOMAIN}/success.html")
 
 @app.get("/health")
