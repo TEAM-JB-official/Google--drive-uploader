@@ -99,9 +99,10 @@ async def handle_file(client, message):
     folder_id = user.get("custom_folder_id")
     status_msg = await message.reply("⏳ Downloading file...")
     os.makedirs("downloads", exist_ok=True)
-    file_path = f"downloads/{user_id}_{uuid.uuid4()}.tmp"
+    temp_path = f"downloads/{user_id}_{uuid.uuid4()}.tmp"
     try:
-        file_path = await client.download_media(message, file_path=file_path)
+        # FIX: use file_name= instead of file_path=
+        file_path = await client.download_media(message, file_name=temp_path)
         filename = (getattr(message.document, 'file_name', None) or
                     getattr(message.video, 'file_name', None) or
                     getattr(message.audio, 'file_name', None) or
