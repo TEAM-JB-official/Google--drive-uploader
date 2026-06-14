@@ -416,7 +416,7 @@ async def upload_url_cmd(client, message):
     user = await get_user(user_id)
     drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     if not drives:
-        await message.reply("Not logged in.")
+        await message.reply("Not logged in. Use /log_in first.")
         return
     allowed, msg = await check_quota(user_id)
     if not allowed:
@@ -425,8 +425,16 @@ async def upload_url_cmd(client, message):
     folder_id = user.get("custom_folder_id")
     status_msg = await message.reply("⏳ Downloading from URL...")
     os.makedirs("downloads", exist_ok=True)
-    safe_filename = "".join(c for c in filename if c.isalnum() or c in '._-')[:100]
-    file_path = f"downloads/{user_id}_{uuid.uuid4()}_{safe_filename}"
+
+    # Shorten filename to max 50 characters (plus extension)
+    name, ext = os.path.splitext(filename)
+    safe_name = name[:50] + ext
+    # Remove any unsafe characters
+    safe_name = "".join(c for c in safe_name if c.isalnum() or c in '._- ')
+    # Generate a short random suffix instead of full UUID
+    short_suffix = str(uuid.uuid4())[:8]
+    file_path = f"downloads/{user_id}_{short_suffix}_{safe_name}"
+
     try:
         task_id = str(uuid.uuid4())
         user_tasks.setdefault(user_id, {})[task_id] = asyncio.current_task()
@@ -434,13 +442,14 @@ async def upload_url_cmd(client, message):
         size_mb = os.path.getsize(file_path) / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
         active_email = user.get("active_drive")
-        add_to_queue(user_id, file_path, safe_filename, folder_id, status_msg.edit_text, email=active_email)
-        await log_action(user_id, "upload", "queued", safe_filename, size_mb)
+        add_to_queue(user_id, file_path, safe_name, folder_id, status_msg.edit_text, email=active_email)
+        await log_action(user_id, "upload", "queued", safe_name, size_mb)
     except asyncio.CancelledError:
         await status_msg.edit_text("❌ Cancelled.")
-        if os.path.exists(file_path): os.remove(file_path)
+        if os.path.exists(file_path):
+            os.remove(file_path)
     except Exception as e:
-        await status_msg.edit_text(f"❌ Failed: {str(e)}")
+        await status_msg.edit_text(f"❌ Download failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
 
 @app.on_message(filters.command("yt"))
