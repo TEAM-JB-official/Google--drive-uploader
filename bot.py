@@ -544,7 +544,15 @@ async def getdrive_cmd(client, message):
         await message.reply("Usage: /getdrive <google_drive_link>\nExample: /getdrive https://drive.google.com/file/d/abc123/view")
         return
     drive_link = args[1]
-    patterns = [r"/file/d/([a-zA-Z0-9_-]+)", r"id=([a-zA-Z0-9_-]+)", r"open\?id=([a-zA-Z0-9_-]+)"]
+    
+    # Extract file ID from various Google Drive link formats
+    patterns = [
+        r"/file/d/([a-zA-Z0-9_-]+)",
+        r"id=([a-zA-Z0-9_-]+)",
+        r"open\?id=([a-zA-Z0-9_-]+)",
+        r"uc\?id=([a-zA-Z0-9_-]+)",
+        r"folders/([a-zA-Z0-9_-]+)"   # for folders (not supported yet)
+    ]
     file_id = None
     for pattern in patterns:
         match = re.search(pattern, drive_link)
@@ -552,26 +560,48 @@ async def getdrive_cmd(client, message):
             file_id = match.group(1)
             break
     if not file_id:
-        await message.reply("❌ Invalid Google Drive link.")
+        await message.reply("❌ Could not extract file ID from the link.\nMake sure it's a valid Google Drive file link.")
         return
+    
+    # Check if user is logged in
     user = await get_user(user_id)
     drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     if not drives:
-        await message.reply("Not logged in. Use /log_in first.")
+        await message.reply("❌ You are not logged in. Use /log_in first.")
         return
+    
     active_email = user.get("active_drive")
-    service = await get_drive_service(user_id, active_email)
-    if not service:
-        await message.reply("Authentication failed. Please /log_in again.")
-        return
-    status_msg = await message.reply("⏳ Fetching file info...")
+    if not active_email and drives:
+        active_email = drives[0].get("email")
     try:
-        file_meta = await asyncio.to_thread(lambda: service.files().get(fileId=file_id, fields="name, size").execute())
+        service = await get_drive_service(user_id, active_email)
+        if not service:
+            await message.reply("❌ Failed to authenticate with Google Drive. Please /log_in again.")
+            return
+        
+        status_msg = await message.reply("⏳ Fetching file information...")
+        
+        # Get file metadata
+        try:
+            file_meta = await asyncio.to_thread(
+                lambda: service.files().get(fileId=file_id, fields="name, size, mimeType").execute()
+            )
+        except Exception as e:
+            await status_msg.edit_text(f"❌ File not found or inaccessible.\nError: {str(e)}")
+            return
+        
         original_filename = file_meta.get("name", "file.bin")
         file_size = int(file_meta.get("size", 0))
         size_mb = file_size / 1e6
-        # Shorten display name for confirmation
-        display_name = original_filename[:50] + ("..." if len(original_filename) > 50 else "")
+        mime_type = file_meta.get("mimeType", "")
+        
+        # Check if it's a folder
+        if mime_type == "application/vnd.google-apps.folder":
+            await status_msg.edit_text("❌ This is a Google Drive folder. Downloading folders is not supported (only single files).")
+            return
+        
+        # For large files, ask for confirmation
+        display_name = original_filename[:40] + ("..." if len(original_filename) > 40 else "")
         if file_size > 50 * 1024 * 1024:
             token = str(uuid.uuid4())[:8]
             _download_pending[token] = {
@@ -591,10 +621,12 @@ async def getdrive_cmd(client, message):
                 reply_markup=kb
             )
             return
+        
         # Small file – download directly
         await download_drive_file(client, message, service, file_id, original_filename, file_size, status_msg)
+        
     except Exception as e:
-        await status_msg.edit_text(f"❌ Failed: {str(e)}")
+        await message.reply(f"❌ Failed: {str(e)}\n\nMake sure you have access to this file and are logged in.")
 
 # ========== Callback Queries ==========
 @app.on_callback_query()
