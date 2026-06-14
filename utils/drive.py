@@ -188,3 +188,36 @@ async def validate_folder(user_id, folder_url, email=None):
         return folder_id, None
     except Exception as e:
         return None, f"Cannot access folder: {str(e)}"
+
+async def fix_missing_emails_for_user(user_id):
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    user = await users_col.find_one({"_id": user_id})
+    if not user:
+        return 0
+    drives = user.get("drive_tokens", [])
+    fixed = 0
+    for i, d in enumerate(drives):
+        if not isinstance(d, dict):
+            continue
+        # Skip if already has a valid email
+        if d.get("email") and "invalid" not in d["email"] and "old" not in d["email"]:
+            continue
+        token_data = d.get("token")
+        if not isinstance(token_data, dict):
+            continue
+        try:
+            creds = Credentials.from_authorized_user_info(token_data)
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            service = build("drive", "v3", credentials=creds)
+            about = service.about().get(fields="user").execute()
+            real_email = about["user"]["emailAddress"]
+            drives[i]["email"] = real_email
+            fixed += 1
+        except Exception as e:
+            print(f"Error fixing email: {e}")
+    if fixed > 0:
+        await users_col.update_one({"_id": user_id}, {"$set": {"drive_tokens": drives}})
+    return fixed
