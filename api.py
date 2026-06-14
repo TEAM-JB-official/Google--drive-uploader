@@ -12,14 +12,19 @@ app = FastAPI()
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 BASE_DOMAIN = DOMAIN.rstrip('/') if DOMAIN else ""
 
-# Try to import add_drive_account; if it fails, print the error
+# Validate credentials
+if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+    raise ValueError("GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is empty")
+print(f"Client ID (first 20 chars): {GOOGLE_CLIENT_ID[:20]}...")
+print(f"Client Secret (first 10 chars): {GOOGLE_CLIENT_SECRET[:10]}...")
+print(f"Redirect URI: {REDIRECT_URI}")
+
+# Try to import add_drive_account
 try:
     from utils.drive import add_drive_account
-    print("✅ add_drive_account imported successfully")
+    print("✅ add_drive_account imported")
 except Exception as e:
     print(f"❌ Failed to import add_drive_account: {e}")
-    traceback.print_exc()
-    # Fallback definition (should never be needed if drive.py is correct)
     async def add_drive_account(user_id, creds_dict, email):
         print(f"FALLBACK: adding account for {user_id} with email {email}")
         user = await users_col.find_one({"_id": user_id})
@@ -46,16 +51,17 @@ async def success_page():
 @app.get("/auth/login")
 async def auth_login(user_id: int, action: str = "add"):
     try:
+        client_config = {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [REDIRECT_URI],
+            }
+        }
         flow = Flow.from_client_config(
-            {
-                "web": {
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "redirect_uris": [REDIRECT_URI],
-                }
-            },
+            client_config,
             scopes=SCOPES,
             redirect_uri=REDIRECT_URI,
         )
@@ -82,14 +88,15 @@ async def auth_callback(code: str, state: str = None):
             action = parts[1] if len(parts) > 1 else "add"
         except:
             raise HTTPException(400, "Invalid state")
+        client_config = {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uris": [REDIRECT_URI],
+            }
+        }
         flow = Flow.from_client_config(
-            {
-                "web": {
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "redirect_uris": [REDIRECT_URI],
-                }
-            },
+            client_config,
             scopes=SCOPES,
             redirect_uri=REDIRECT_URI,
         )
