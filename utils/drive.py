@@ -144,6 +144,8 @@ async def get_user_drives(user_id):
     for item in tokens:
         if isinstance(item, dict):
             email = item.get("email")
+            if not email:
+                continue
             token_data = item.get("token")
             if isinstance(token_data, dict) and "token" in token_data:
                 emails.append(email)
