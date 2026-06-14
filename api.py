@@ -12,6 +12,28 @@ app = FastAPI()
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 BASE_DOMAIN = DOMAIN.rstrip('/') if DOMAIN else ""
 
+# Clean and validate credentials at startup
+CLIENT_ID = (GOOGLE_CLIENT_ID or "").strip()
+CLIENT_SECRET = (GOOGLE_CLIENT_SECRET or "").strip()
+
+if not CLIENT_ID or not CLIENT_SECRET:
+    raise ValueError("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set and non-empty")
+
+# Log first few chars to verify (will appear in Koyeb logs)
+print(f"Loaded CLIENT_ID: {CLIENT_ID[:20]}...")
+print(f"Loaded CLIENT_SECRET: {CLIENT_SECRET[:10]}...")
+
+# Correct client config dictionary
+CLIENT_CONFIG = {
+    "web": {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": [REDIRECT_URI],
+    }
+}
+
 @app.get("/success.html", response_class=HTMLResponse)
 async def success_page():
     return """
@@ -29,15 +51,7 @@ async def success_page():
 async def auth_login(user_id: int):
     try:
         flow = Flow.from_client_config(
-            {
-                "web": {
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                    "token_uri": "https://oauth2.googleapis.com/token",
-                    "redirect_uris": [REDIRECT_URI],
-                }
-            },
+            CLIENT_CONFIG,
             scopes=SCOPES,
             redirect_uri=REDIRECT_URI,
         )
@@ -64,13 +78,7 @@ async def auth_callback(code: str, state: str = None):
             raise HTTPException(400, "Invalid state")
         
         flow = Flow.from_client_config(
-            {
-                "web": {
-                    "client_id": GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "redirect_uris": [REDIRECT_URI],
-                }
-            },
+            CLIENT_CONFIG,
             scopes=SCOPES,
             redirect_uri=REDIRECT_URI,
         )
