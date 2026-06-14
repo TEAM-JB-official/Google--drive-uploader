@@ -17,16 +17,34 @@ async def success_page():
     <html>
     <head>
         <title>Authentication Successful</title>
-        <script>
-            setTimeout(function() {
-                window.close();
-            }, 3000);
-        </script>
+        <style>
+            body {
+                text-align: center;
+                background: #4CAF50;
+                color: white;
+                padding: 50px;
+                font-family: Arial, sans-serif;
+            }
+            button {
+                margin-top: 20px;
+                padding: 10px 20px;
+                background: white;
+                color: #4CAF50;
+                border: none;
+                border-radius: 5px;
+                font-size: 16px;
+                cursor: pointer;
+            }
+            button:hover {
+                background: #f0f0f0;
+            }
+        </style>
     </head>
-    <body style="text-align:center;background:#4CAF50;color:white;padding:50px">
+    <body>
         <h1>✅ Authentication Successful</h1>
         <p>You may close this window and return to Telegram.</p>
-        <p>This window will close automatically in 3 seconds...</p>
+        <button onclick="window.close()">Close Window</button>
+        <p><small>If the button doesn't work, simply close this tab.</small></p>
     </body>
     </html>
     """
