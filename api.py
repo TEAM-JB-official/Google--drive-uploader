@@ -1,127 +1,77 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
-import os
-import traceback
+import requests
 from config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, REDIRECT_URI, DOMAIN
 from db.mongo import users_col
+from utils.drive import add_drive_account
 
 app = FastAPI()
-
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 BASE_DOMAIN = DOMAIN.rstrip('/') if DOMAIN else ""
-
-# Validate credentials
-if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-    raise ValueError("GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is empty")
-print(f"Client ID (first 20 chars): {GOOGLE_CLIENT_ID[:20]}...")
-print(f"Client Secret (first 10 chars): {GOOGLE_CLIENT_SECRET[:10]}...")
-print(f"Redirect URI: {REDIRECT_URI}")
-
-# Try to import add_drive_account
-try:
-    from utils.drive import add_drive_account
-    print("✅ add_drive_account imported")
-except Exception as e:
-    print(f"❌ Failed to import add_drive_account: {e}")
-    async def add_drive_account(user_id, creds_dict, email):
-        print(f"FALLBACK: adding account for {user_id} with email {email}")
-        user = await users_col.find_one({"_id": user_id})
-        if not user:
-            await users_col.insert_one({"_id": user_id, "drive_tokens": []})
-        drives = user.get("drive_tokens", [])
-        drives = [d for d in drives if not (isinstance(d, dict) and d.get("email") == email)]
-        drives.append({"email": email, "token": creds_dict})
-        await users_col.update_one({"_id": user_id}, {"$set": {"drive_tokens": drives}})
 
 @app.get("/success.html", response_class=HTMLResponse)
 async def success_page():
     return """
     <!DOCTYPE html>
-    <html>
-    <head><title>Success</title></head>
-    <body style="text-align:center;font-family:Arial;padding:50px;background:#4CAF50;color:white;">
+    <html><head><title>Success</title></head>
+    <body style="text-align:center;background:#4CAF50;color:white;padding:50px">
         <h1>✅ Authentication Successful</h1>
         <p>You may close this window and return to Telegram.</p>
-    </body>
-    </html>
+    </body></html>
     """
 
 @app.get("/auth/login")
 async def auth_login(user_id: int, action: str = "add"):
-    try:
-        client_config = {
-            "web": {
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [REDIRECT_URI],
-            }
-        }
-        flow = Flow.from_client_config(
-            client_config,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI,
-        )
-        auth_url, _ = flow.authorization_url(
-            prompt="consent",
-            access_type="offline",
-            include_granted_scopes="true",
-            state=f"{user_id}|{action}"
-        )
-        return RedirectResponse(auth_url)
-    except Exception as e:
-        print(f"Login error: {e}")
-        traceback.print_exc()
-        raise HTTPException(500, f"Login error: {str(e)}")
+    # Build Google OAuth URL manually
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "scope": "https://www.googleapis.com/auth/drive.file",
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": f"{user_id}|{action}",
+    }
+    from urllib.parse import urlencode
+    auth_url = "https://accounts.google.com/o/oauth2/auth?" + urlencode(params)
+    return RedirectResponse(auth_url)
 
 @app.get("/auth/callback")
 async def auth_callback(code: str, state: str = None):
+    if not state:
+        raise HTTPException(400, "Missing state")
+    parts = state.split("|")
     try:
-        if not state:
-            raise HTTPException(400, "Missing state")
-        parts = state.split("|")
-        try:
-            user_id = int(parts[0])
-            action = parts[1] if len(parts) > 1 else "add"
-        except:
-            raise HTTPException(400, "Invalid state")
-        client_config = {
-            "web": {
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uris": [REDIRECT_URI],
-            }
-        }
-        flow = Flow.from_client_config(
-            client_config,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI,
-        )
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-        creds_dict = {
-            "token": creds.token,
-            "refresh_token": creds.refresh_token,
-            "token_uri": creds.token_uri,
-            "client_id": creds.client_id,
-            "client_secret": creds.client_secret,
-            "scopes": creds.scopes
-        }
-        from google.oauth2.credentials import Credentials
-        creds_obj = Credentials.from_authorized_user_info(creds_dict)
-        service = build("drive", "v3", credentials=creds_obj)
-        about = service.about().get(fields="user").execute()
-        email = about["user"]["emailAddress"]
-        if action == "add":
-            await add_drive_account(user_id, creds_dict, email)
-        return RedirectResponse(url=f"{BASE_DOMAIN}/success.html")
-    except Exception as e:
-        print(f"Callback error: {e}")
-        traceback.print_exc()
-        raise HTTPException(500, f"Callback error: {str(e)}")
+        user_id = int(parts[0])
+        action = parts[1] if len(parts) > 1 else "add"
+    except:
+        raise HTTPException(400, "Invalid state")
+    # Exchange code for token using direct POST
+    data = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "code": code,
+        "redirect_uri": REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+    resp = requests.post("https://oauth2.googleapis.com/token", data=data)
+    if resp.status_code != 200:
+        raise HTTPException(500, f"Token exchange failed: {resp.text}")
+    token_info = resp.json()
+    creds_dict = {
+        "token": token_info["access_token"],
+        "refresh_token": token_info.get("refresh_token"),
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "scopes": ["https://www.googleapis.com/auth/drive.file"],
+    }
+    # Get user email
+    headers = {"Authorization": f"Bearer {token_info['access_token']}"}
+    userinfo = requests.get("https://www.googleapis.com/oauth2/v1/userinfo", headers=headers).json()
+    email = userinfo.get("email")
+    if action == "add":
+        await add_drive_account(user_id, creds_dict, email)
+    return RedirectResponse(url=f"{BASE_DOMAIN}/success.html")
 
 @app.get("/health")
 async def health():
