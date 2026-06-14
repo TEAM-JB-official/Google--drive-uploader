@@ -222,6 +222,9 @@ async def stats_cmd(client, message):
         await message.reply("You have not logged in. Use /help to know how to log in.")
         return
     email = drives[0]
+    if email is None:
+        await message.reply("❌ Your Google Drive email is missing. Please use /log_in again.")
+        return
     if "invalid" in email.lower() or "re‑login" in email.lower() or "old token" in email.lower():
         await message.reply("❌ Your stored Google Drive token is invalid or expired.\nPlease use /log_in again to re‑authenticate.")
         return
@@ -243,7 +246,7 @@ async def stats_cmd(client, message):
         f"**Total Free Storage:** {free_gb:.2f} GB\n\n"
         f"{bar} ({percent:.2f}%) used of {total_gb:.1f} GB."
     )
-
+    
 @app.on_message(filters.command("account"))
 async def account_cmd(client, message):
     user_id = message.from_user.id
@@ -255,10 +258,30 @@ async def account_cmd(client, message):
     limit = PLANS[plan]["daily_uploads"]
     bar, percent = format_storage_bar(used, limit)
     reset_time = get_quota_reset_time(user)
-    total_transferred_bytes = 0
-    async for log in logs_col.find({"user_id": user_id, "action": "upload", "status": "success"}):
-        total_transferred_bytes += log.get("size_mb", 0) * 1024 * 1024
-    total_transferred_gb = total_transferred_bytes / (1024**3)
+
+    # Today's uploaded MB
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    pipeline_today = [
+        {"$match": {
+            "user_id": user_id,
+            "action": "upload",
+            "status": "success",
+            "timestamp": {"$gte": today_start}
+        }},
+        {"$group": {"_id": None, "total_mb": {"$sum": "$size_mb"}}}
+    ]
+    result_today = await logs_col.aggregate(pipeline_today).to_list(length=1)
+    today_mb = result_today[0]["total_mb"] if result_today else 0
+
+    # Total uploaded MB (all time)
+    pipeline_total = [
+        {"$match": {"user_id": user_id, "action": "upload", "status": "success"}},
+        {"$group": {"_id": None, "total_mb": {"$sum": "$size_mb"}}}
+    ]
+    result_total = await logs_col.aggregate(pipeline_total).to_list(length=1)
+    total_mb = result_total[0]["total_mb"] if result_total else 0
+    total_gb = total_mb / 1024
+
     await message.reply(
         f"**Name:** {message.from_user.first_name}\n"
         f"**Telegram Id:** {user_id}\n"
@@ -272,8 +295,8 @@ async def account_cmd(client, message):
         f"    {bar} ({percent:.1f}%)\n\n"
         f"    Your quota will reset in {reset_time}.\n\n"
         f"📊 **Data Usage**\n"
-        f"• Today: 0.00 MB\n"
-        f"• Total (since {user.get('created_at', datetime.utcnow()).strftime('%Y-%m-%d')}): {total_transferred_gb:.2f} GB"
+        f"• Today: {today_mb:.2f} MB\n"
+        f"• Total (since {user.get('created_at', datetime.utcnow()).strftime('%Y-%m-%d')}): {total_gb:.2f} GB"
     )
 
 @app.on_message(filters.command("referral"))
