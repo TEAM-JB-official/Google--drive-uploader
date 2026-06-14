@@ -14,7 +14,6 @@ from utils.queue import add_to_queue
 from utils.logger import log_action, bot_instance as logger_bot
 from utils.downloader import download_http, download_youtube
 
-# Set logger bot instance
 app = Client("gdrive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 import utils.logger
 utils.logger.bot_instance = app
@@ -37,6 +36,14 @@ async def get_user(user_id):
         })
         user = await users_col.find_one({"_id": user_id})
     return user
+
+async def progress_callback(current, total, status_msg, text):
+    percent = (current * 100) // total if total else 0
+    bar = "█" * (percent // 10) + "░" * (10 - (percent // 10))
+    try:
+        await status_msg.edit_text(f"{text}\n{bar} {percent}%")
+    except:
+        pass
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message: Message):
@@ -82,7 +89,6 @@ async def help_cmd(client, message):
 async def login_cmd(client, message):
     user_id = message.from_user.id
     await get_user(user_id)
-    # Ensure DOMAIN has no trailing slash
     domain = DOMAIN.rstrip('/')
     auth_url = f"{domain}/auth/login?user_id={user_id}"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔐 Authorize Google Drive", url=auth_url)]])
@@ -101,12 +107,16 @@ async def handle_file(client, message):
     os.makedirs("downloads", exist_ok=True)
     temp_path = f"downloads/{user_id}_{uuid.uuid4()}.tmp"
     try:
-        # FIX: use file_name= instead of file_path=
-        file_path = await client.download_media(message, file_name=temp_path)
+        file_path = await client.download_media(
+            message,
+            file_name=temp_path,
+            progress=progress_callback,
+            progress_args=(status_msg, "⏳ Downloading file...")
+        )
         filename = (getattr(message.document, 'file_name', None) or
                     getattr(message.video, 'file_name', None) or
                     getattr(message.audio, 'file_name', None) or
-                    f"file_{message.message_id}")
+                    f"file_{message.id}")   # fixed: message.id
         file_size = (message.document.file_size if message.document else
                      message.video.file_size if message.video else
                      message.audio.file_size if message.audio else
@@ -139,7 +149,7 @@ async def upload_url_cmd(client, message):
     safe_filename = "".join(c for c in filename if c.isalnum() or c in '._-')[:100]
     file_path = f"downloads/{user_id}_{uuid.uuid4()}_{safe_filename}"
     try:
-        await download_http(url, file_path)
+        await download_http(url, file_path, progress_callback, status_msg, "⏳ Downloading from URL...")
         size_mb = os.path.getsize(file_path) / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
         add_to_queue(user_id, file_path, safe_filename, folder_id, status_msg.edit_text, status_msg.id)
@@ -162,11 +172,11 @@ async def youtube_cmd(client, message):
         await message.reply(msg)
         return
     folder_id = user.get("custom_folder_id")
-    status_msg = await message.reply("⏳ Downloading YouTube video (may take a while)...")
+    status_msg = await message.reply("⏳ Downloading YouTube video...")
     os.makedirs("downloads", exist_ok=True)
     temp_template = f"downloads/{user_id}_{uuid.uuid4()}_%(title)s.%(ext)s"
     try:
-        final_path = await download_youtube(url, temp_template)
+        final_path = await download_youtube(url, temp_template, progress_callback, status_msg)
         filename = os.path.basename(final_path)
         size_mb = os.path.getsize(final_path) / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
@@ -223,7 +233,6 @@ async def upgrade_cmd(client, message):
 @app.on_message(filters.command("stats"))
 async def stats_cmd(client, message):
     user_id = message.from_user.id
-    # Count successful uploads from logs
     cursor = logs_col.aggregate([
         {"$match": {"user_id": user_id, "action": "upload", "status": "success"}},
         {"$count": "count"}
