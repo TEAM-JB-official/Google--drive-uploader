@@ -9,21 +9,19 @@ from db.mongo import users_col
 
 app = FastAPI()
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+# Use both scopes to match previously granted permissions
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive"   # include full drive to avoid scope change error
+]
 BASE_DOMAIN = DOMAIN.rstrip('/') if DOMAIN else ""
 
-# Clean and validate credentials at startup
+# Clean and validate credentials
 CLIENT_ID = (GOOGLE_CLIENT_ID or "").strip()
 CLIENT_SECRET = (GOOGLE_CLIENT_SECRET or "").strip()
-
 if not CLIENT_ID or not CLIENT_SECRET:
-    raise ValueError("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set and non-empty")
+    raise ValueError("Missing Google OAuth credentials")
 
-# Log first few chars to verify (will appear in Koyeb logs)
-print(f"Loaded CLIENT_ID: {CLIENT_ID[:20]}...")
-print(f"Loaded CLIENT_SECRET: {CLIENT_SECRET[:10]}...")
-
-# Correct client config dictionary
 CLIENT_CONFIG = {
     "web": {
         "client_id": CLIENT_ID,
@@ -56,14 +54,14 @@ async def auth_login(user_id: int):
             redirect_uri=REDIRECT_URI,
         )
         auth_url, _ = flow.authorization_url(
-            prompt="consent",
+            prompt="consent",          # Force consent to re-request scopes
             access_type="offline",
             include_granted_scopes="true",
             state=str(user_id)
         )
         return RedirectResponse(auth_url)
     except Exception as e:
-        print(f"Login error: {str(e)}")
+        print(f"Login error: {e}")
         print(traceback.format_exc())
         raise HTTPException(500, f"Internal error: {str(e)}")
 
@@ -79,7 +77,7 @@ async def auth_callback(code: str, state: str = None):
         
         flow = Flow.from_client_config(
             CLIENT_CONFIG,
-            scopes=SCOPES,
+            scopes=SCOPES,            # Same scopes as login
             redirect_uri=REDIRECT_URI,
         )
         flow.fetch_token(code=code)
@@ -104,7 +102,7 @@ async def auth_callback(code: str, state: str = None):
         )
         return RedirectResponse(url=f"{BASE_DOMAIN}/success.html")
     except Exception as e:
-        print(f"Callback error: {str(e)}")
+        print(f"Callback error: {e}")
         print(traceback.format_exc())
         raise HTTPException(500, f"Internal error: {str(e)}")
 
