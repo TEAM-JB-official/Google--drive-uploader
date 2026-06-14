@@ -1,8 +1,8 @@
 import asyncio
 import os
 import time
+import uuid
 from utils.drive import upload_file_to_drive
-from utils.downloader import cancel_download
 
 user_queues = {}
 user_semaphores = {}
