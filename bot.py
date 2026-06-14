@@ -551,7 +551,7 @@ async def getdrive_cmd(client, message):
         r"id=([a-zA-Z0-9_-]+)",
         r"open\?id=([a-zA-Z0-9_-]+)",
         r"uc\?id=([a-zA-Z0-9_-]+)",
-        r"folders/([a-zA-Z0-9_-]+)"   # for folders (not supported yet)
+        r"folders/([a-zA-Z0-9_-]+)"
     ]
     file_id = None
     for pattern in patterns:
@@ -587,7 +587,10 @@ async def getdrive_cmd(client, message):
                 lambda: service.files().get(fileId=file_id, fields="name, size, mimeType").execute()
             )
         except Exception as e:
-            await status_msg.edit_text(f"❌ File not found or inaccessible.\nError: {str(e)}")
+            # If Drive API fails, try public download (no login required)
+            public_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+            await status_msg.edit_text("⚠️ File not found in your Drive. Attempting public download...")
+            await download_public_drive_file(client, message, public_url, file_id, status_msg)
             return
         
         original_filename = file_meta.get("name", "file.bin")
@@ -628,6 +631,62 @@ async def getdrive_cmd(client, message):
     except Exception as e:
         await message.reply(f"❌ Failed: {str(e)}\n\nMake sure you have access to this file and are logged in.")
 
+async def download_public_drive_file(client, message, public_url, file_id, status_msg):
+    """Download a file from a public Google Drive link without API authentication."""
+    user_id = message.chat.id if hasattr(message, 'chat') else message.from_user.id
+    os.makedirs("downloads", exist_ok=True)
+    
+    # Get filename from the public page first
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(public_url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    raise Exception(f"HTTP {resp.status}")
+                # Try to get filename from Content-Disposition header
+                content_disp = resp.headers.get('Content-Disposition', '')
+                if 'filename=' in content_disp:
+                    filename = content_disp.split('filename=')[1].strip('"')
+                else:
+                    filename = f"file_{file_id}.bin"
+    except Exception as e:
+        filename = f"file_{file_id}.bin"
+    
+    # Use extremely short random filename (8 chars + extension)
+    ext = os.path.splitext(filename)[1] or ".bin"
+    random_name = f"{uuid.uuid4().hex[:8]}{ext}"
+    temp_path = f"downloads/{user_id}_{random_name}"
+    
+    try:
+        # Download using direct public URL
+        async with aiohttp.ClientSession() as session:
+            async with session.get(public_url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    raise Exception(f"HTTP {resp.status}")
+                total = int(resp.headers.get('content-length', 0))
+                downloaded = 0
+                await status_msg.edit_text("⏳ Downloading public file...")
+                with open(temp_path, 'wb') as f:
+                    async for chunk in resp.content.iter_chunked(1024*1024):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        # Simple progress update
+                        if total > 0:
+                            percent = (downloaded * 100) // total
+                            await status_msg.edit_text(f"⏳ Downloading public file... {percent}%")
+        
+        await status_msg.edit_text("📤 Sending file to Telegram...")
+        await client.send_document(
+            chat_id=user_id,
+            document=temp_path,
+            caption=f"✅ **Downloaded from Public Drive:**\n`{filename}`\n📏 Size: {os.path.getsize(temp_path)/1e6:.2f} MB"
+        )
+        await status_msg.delete()
+        os.remove(temp_path)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Public download failed: {str(e)}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+            
 # ========== Callback Queries ==========
 @app.on_callback_query()
 async def callback_handler(client, callback_query: CallbackQuery):
