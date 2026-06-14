@@ -4,6 +4,7 @@ import uuid
 import random
 import string
 import time
+import re
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -17,6 +18,7 @@ from utils.drive import (
 from utils.queue import add_to_queue, cancel_user_task
 from utils.logger import log_action, bot_instance as logger_bot
 from utils.downloader import download_http, download_youtube
+from googleapiclient.http import MediaIoBaseDownload
 
 app = Client("gdrive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 import utils.logger
@@ -88,7 +90,7 @@ def get_quota_reset_time(user):
     delta = reset_dt - datetime.utcnow()
     return str(timedelta(seconds=delta.total_seconds())).split('.')[0]
 
-# ========== User Commands (Part 1) ==========
+# ========== User Commands ==========
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message: Message):
     user_id = message.from_user.id
@@ -111,56 +113,36 @@ async def start_cmd(client, message: Message):
         "Use /help to know how I work and to authorise me.\n\n"
         "**🤖 What I Can Do**\n"
         "1️⃣ **Upload Telegram Files to Google Drive**\n"
-        "I can upload Videos, Documents, Photos, Audio, Voice Notes, GIFs, and more directly from Telegram to your Google Drive.\n\n"
-        "2️⃣ **Upload Files from Direct Download Links**\n"
-        "Just send me any direct download link (non–IP-restricted), and I’ll upload the file to your Drive. You can even set custom filenames.\n\n"
-        "🔐 **Linking Google Drive**\n"
-        "1️⃣ Get your Sign In link from /log_in.\n"
-        "2️⃣ Open the link → Sign in with your Google Account → Allow access. That’s it! 🤠\n\n"
-        "✨ You can link multiple Google Drive accounts using the same method.\n"
-        "✨ Switch between accounts using /setdrive.\n"
-        "✨ Log out using /log_out.\n\n"
-        "📤 **How to Use the Bot**\n"
-        "➤ **Uploading Telegram Files**\nJust forward/send any Telegram file, and I’ll upload it automatically.\n\n"
-        "➤ **Uploading From Direct Links**\nSend me any valid direct download URL.\nYou may also attach a custom filename using the format: `download-link | custom filename`.\n\n"
-        "🧾 **Other Commands**\n"
-        "📊 /stats – View Drive storage stats\n"
-        "👤 /account – View your account details\n"
-        "⭐ /myplan – View current plan and usage\n"
-        "🎁 /referral – Get your referral link\n"
-        "💳 /upgrade – Activate premium (via referral rewards)\n"
-        "📁 /setfolder – Set default upload folder\n"
-        "🗑 /removefolder – Remove upload folder\n"
-        "🔒 /privacy – Privacy policy\n"
-        "🚪 /log_out – Logout from a Drive account\n"
-        "📂 /mydrives – List linked Drive accounts\n"
-        "🔄 /setdrive – Choose which Drive account to upload to\n"
-        "🔍 /showdrive – Show current active Drive account"
+        "2️⃣ **Upload Files from Direct Download Links**\n\n"
+        "🔐 **Linking Google Drive**\n1️⃣ /log_in\n2️⃣ Open link → Sign in\n\n"
+        "📤 **Uploading**\nJust send a file or use /upload\n\n"
+        "🧾 **Commands:** /help"
     )
 
 @app.on_message(filters.command("help"))
 async def help_cmd(client, message):
     text = """**Commands:**
-/log_in – Connect a Google Drive account
-/log_out – Remove a linked account
-/mydrives – List your linked accounts
-/setdrive – Choose which Drive account to use for uploads
-/showdrive – Show current active Drive account
-/upload <url> [filename] – Upload from direct link
-/yt <YouTube URL> – Download & upload YouTube video
-/setfolder <folder_url> – Default upload folder
-/removefolder – Remove custom folder
-/myplan – Your plan & usage
+/log_in – Connect Google Drive
+/log_out – Remove account
+/mydrives – List linked accounts
+/setdrive – Choose active drive
+/showdrive – Show active drive
+/upload <url> – Upload from URL
+/yt <url> – YouTube upload
+/setfolder – Set default folder
+/removefolder – Remove folder
+/myplan – Plan & usage
 /stats – Drive storage stats
 /account – Account details
-/referral – Get referral link
-/upgrade – Activate premium (if rewards available)
-/privacy – Privacy policy & ToS"""
+/referral – Referral link
+/upgrade – Activate premium
+/getdrive <link> – Download file from Drive to Telegram
+/privacy – Privacy policy"""
     await message.reply(text)
 
 @app.on_message(filters.command("privacy"))
 async def privacy_cmd(client, message):
-    await message.reply("**Privacy Policy**\n\nYour Google Drive tokens are stored encrypted and used only for file uploads. We do not share your data with third parties.\n\n**Terms of Service**\nThis bot is provided as-is. We are not responsible for misuse of your Drive. Use at your own risk.")
+    await message.reply("**Privacy Policy**\n\nYour tokens are stored encrypted and used only for file operations.")
 
 @app.on_message(filters.command("log_in"))
 async def login_cmd(client, message):
@@ -170,22 +152,15 @@ async def login_cmd(client, message):
     max_accounts = PLANS[plan]["accounts"]
     valid_count = await count_valid_drives(user_id)
     if valid_count >= max_accounts:
-        await message.reply(
-            f"❌ You already have {max_accounts} valid Google Drive accounts.\n"
-            f"Use `/log_out` to remove one, or upgrade your plan.\n"
-            f"Your plan: **{plan.upper()}** (max {max_accounts} accounts)."
-        )
+        await message.reply(f"❌ You already have {max_accounts} valid accounts. Use /log_out to remove one.")
         return
     domain = DOMAIN.rstrip('/')
     auth_url = f"{domain}/auth/login?user_id={user_id}&action=add"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔐 Authorize Google Drive", url=auth_url)]])
-    await message.reply(
-        "Open the login page URL, click Sign in with Google, select your Google account, read the privacy policy, and give access.\n\n"
-        "**Note:** This is a unique URL, only you can/should use this. If you generate new Sign In URL, this URL will not be valid anymore!\n"
-        "If the button does not work, [click here]({})".format(auth_url),
-        reply_markup=kb,
-        disable_web_page_preview=True
-    )
+    await message.reply("Open the login page URL, click Sign in with Google, select your account, and give access.\n\n"
+                        "**Note:** Unique URL, only you can use it.\n"
+                        f"If button doesn't work: {auth_url}",
+                        reply_markup=kb, disable_web_page_preview=True)
 
 @app.on_message(filters.command("log_out"))
 async def logout_cmd(client, message):
@@ -193,12 +168,12 @@ async def logout_cmd(client, message):
     user = await get_user(user_id)
     drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     if not drives:
-        await message.reply("You have no linked Google accounts.")
+        await message.reply("No linked accounts.")
         return
     if len(drives) == 1:
         email = drives[0].get("email", "Unknown")
         await remove_drive_account(user_id, email)
-        await message.reply(f"✅ Successfully logged out from {email}! Use /log_in to login again.")
+        await message.reply(f"✅ Logged out from {email}.")
     else:
         keyboard = []
         for acc in drives:
@@ -211,9 +186,9 @@ async def mydrives_cmd(client, message):
     user_id = message.from_user.id
     drives = await get_user_drives(user_id)
     if not drives:
-        await message.reply("You have not logged in. Use /help to know how to log in.")
+        await message.reply("You have not logged in. Use /log_in.")
         return
-    text = "**Your linked Google Drive accounts:**\n\n"
+    text = "**Linked Google Drive accounts:**\n\n"
     for idx, email in enumerate(drives, 1):
         text += f"{idx}. {email}\n"
     await message.reply(text)
@@ -223,16 +198,14 @@ async def set_drive_cmd(client, message):
     user_id = message.from_user.id
     drives = await get_user_drives(user_id)
     if not drives:
-        await message.reply("You have no linked accounts. Use /log_in first.")
+        await message.reply("No linked accounts. Use /log_in first.")
         return
     if len(drives) == 1:
         await users_col.update_one({"_id": user_id}, {"$set": {"active_drive": drives[0]}})
         await message.reply(f"✅ Default drive set to {drives[0]}")
         return
-    keyboard = []
-    for email in drives:
-        keyboard.append([InlineKeyboardButton(email, callback_data=f"setdrive_{email}")])
-    await message.reply("Select which Google Drive to use for uploads:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton(email, callback_data=f"setdrive_{email}")] for email in drives]
+    await message.reply("Select which Drive to use for uploads:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 @app.on_message(filters.command("showdrive"))
 async def show_drive_cmd(client, message):
@@ -244,33 +217,20 @@ async def show_drive_cmd(client, message):
     else:
         await message.reply(f"✅ Current default drive: {active}")
 
-@app.on_message(filters.command("fix_my_email") & filters.user(ADMIN_IDS))
-async def fix_my_email_cmd(client, message):
-    user_id = message.from_user.id
-    from utils.drive import fix_missing_emails_for_user
-    count = await fix_missing_emails_for_user(user_id)
-    if count == 0:
-        await message.reply("No drive token without an email found, or all already have emails.")
-    else:
-        await message.reply(f"✅ Fixed {count} drive account(s). Now try /mydrives or /stats.")
-
 @app.on_message(filters.command("stats"))
 async def stats_cmd(client, message):
     user_id = message.from_user.id
     drives = await get_user_drives(user_id)
     if not drives:
-        await message.reply("You have not logged in. Use /help to know how to log in.")
+        await message.reply("Not logged in. Use /log_in.")
         return
     email = drives[0]
-    if email is None:
-        await message.reply("❌ Your Google Drive email is missing. Please use /log_in again.")
-        return
-    if "invalid" in email.lower() or "re‑login" in email.lower() or "old token" in email.lower():
-        await message.reply("❌ Your stored Google Drive token is invalid or expired.\nPlease use /log_in again to re‑authenticate.")
+    if email is None or "invalid" in email.lower():
+        await message.reply("Token invalid. Please /log_in again.")
         return
     stats = await get_drive_stats(user_id, email)
     if not stats:
-        await message.reply("Failed to fetch Drive stats. Make sure your token is valid.")
+        await message.reply("Failed to fetch stats.")
         return
     total_gb = stats['total'] / (1024**3)
     used_gb = stats['used'] / (1024**3)
@@ -280,13 +240,13 @@ async def stats_cmd(client, message):
     await message.reply(
         f"**Display Name:** {message.from_user.first_name}\n"
         f"**Email:** {email}\n\n"
-        f"**Total Available Storage:** {total_gb:.2f} GB\n"
-        f"**Total Storage Used:** {used_gb:.2f} GB\n"
-        f"**Total Storage Used in Trash:** {trash_gb:.2f} GB\n"
-        f"**Total Free Storage:** {free_gb:.2f} GB\n\n"
+        f"**Total Available:** {total_gb:.2f} GB\n"
+        f"**Used:** {used_gb:.2f} GB\n"
+        f"**Trash:** {trash_gb:.2f} GB\n"
+        f"**Free:** {free_gb:.2f} GB\n\n"
         f"{bar} ({percent:.2f}%) used of {total_gb:.1f} GB."
     )
-    
+
 @app.on_message(filters.command("account"))
 async def account_cmd(client, message):
     user_id = message.from_user.id
@@ -298,43 +258,30 @@ async def account_cmd(client, message):
     limit = PLANS[plan]["daily_uploads"]
     bar, percent = format_storage_bar(used, limit)
     reset_time = get_quota_reset_time(user)
-
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    pipeline_today = [
-        {"$match": {
-            "user_id": user_id,
-            "action": "upload",
-            "status": "success",
-            "timestamp": {"$gte": today_start}
-        }},
-        {"$group": {"_id": None, "total_mb": {"$sum": "$size_mb"}}}
-    ]
+    pipeline_today = [{"$match": {"user_id": user_id, "action": "upload", "status": "success", "timestamp": {"$gte": today_start}}},
+                      {"$group": {"_id": None, "total_mb": {"$sum": "$size_mb"}}}]
     result_today = await logs_col.aggregate(pipeline_today).to_list(length=1)
     today_mb = result_today[0]["total_mb"] if result_today else 0
-
-    pipeline_total = [
-        {"$match": {"user_id": user_id, "action": "upload", "status": "success"}},
-        {"$group": {"_id": None, "total_mb": {"$sum": "$size_mb"}}}
-    ]
+    pipeline_total = [{"$match": {"user_id": user_id, "action": "upload", "status": "success"}},
+                      {"$group": {"_id": None, "total_mb": {"$sum": "$size_mb"}}}]
     result_total = await logs_col.aggregate(pipeline_total).to_list(length=1)
     total_mb = result_total[0]["total_mb"] if result_total else 0
     total_gb = total_mb / 1024
-
     await message.reply(
         f"**Name:** {message.from_user.first_name}\n"
         f"**Telegram Id:** {user_id}\n"
-        f"**Referral:** {user.get('referred_by') and 'Referred by someone' or 'You were not referred by anyone!'}\n\n"
+        f"**Referral:** {'Referred' if user.get('referred_by') else 'None'}\n\n"
         f"🔗 **Your Referral Link**\n"
-        f"`https://t.me/{ (await client.get_me()).username }?start=ref_{user.get('referral_code')}`\n"
-        f"Share this link with your friends and earn free plan upgrades! (Read /referral to know more)\n\n"
-        f"⭐ **Current Plan:** {plan.capitalize()} User:\n"
+        f"`https://t.me/{ (await client.get_me()).username }?start=ref_{user.get('referral_code')}`\n\n"
+        f"⭐ **Plan:** {plan.capitalize()}\n"
         f"    Used: {used} / {limit}\n"
-        f"    Balance: {limit - used}\n\n"
-        f"    {bar} ({percent:.1f}%)\n\n"
-        f"    Your quota will reset in {reset_time}.\n\n"
+        f"    Balance: {limit - used}\n"
+        f"    {bar} ({percent:.1f}%)\n"
+        f"    Resets in {reset_time}\n\n"
         f"📊 **Data Usage**\n"
         f"• Today: {today_mb:.2f} MB\n"
-        f"• Total (since {user.get('created_at', datetime.utcnow()).strftime('%Y-%m-%d')}): {total_gb:.2f} GB"
+        f"• Total: {total_gb:.2f} GB"
     )
 
 @app.on_message(filters.command("referral"))
@@ -344,29 +291,7 @@ async def referral_cmd(client, message):
     code = user.get("referral_code")
     bot_username = (await client.get_me()).username
     link = f"https://t.me/{bot_username}?start=ref_{code}"
-    remaining = await get_remaining_uploads(user_id)
-    plan = user.get("plan", "free")
-    limit = PLANS[plan]["daily_uploads"]
-    used = user.get("daily_upload_count", 0)
-    percent = (used / limit) * 100 if limit else 0
-    bar = "⬜" * 10
-    if percent > 0:
-        filled = int(percent // 10)
-        bar = "🟩" * filled + "⬜" * (10 - filled)
-    reset_time = get_quota_reset_time(user)
-    await message.reply(
-        f"**Name:** {message.from_user.first_name}\n"
-        f"**Telegram Id:** {user_id}\n"
-        f"You were not referred by anyone!\n\n"
-        f"Your referral link is:\n`{link}`\n"
-        f"Share this link and refer your friends to get free plan upgrade!! (Read /referral to know more)\n\n"
-        f"Your current plan is {plan.capitalize()} User:\n"
-        f"    Used quota {used} of {limit}, balance {limit - used}.\n\n"
-        f"    {bar} ({percent:.1f}%)\n\n"
-        f"    Your quota will reset in {reset_time}.\n\n"
-        f"Use /my_plans to check your upcoming plans.\n\n"
-        f"You have transferred 0 B today and {0} GB in total (data since {user.get('created_at', datetime.utcnow()).strftime('%Y-%m-%d')})."
-    )
+    await message.reply(f"**Your referral link:**\n`{link}`\n\nFor every 3 friends you get 7 days premium.")
 
 @app.on_message(filters.command("myplan"))
 async def myplan_cmd(client, message):
@@ -380,19 +305,11 @@ async def myplan_cmd(client, message):
         days = time_left.days
         hours = time_left.seconds // 3600
         minutes = (time_left.seconds % 3600) // 60
-        expiry_date = expiry.strftime("%d-%m-%Y")
-        expiry_time = expiry.strftime("%I:%M:%S %p")
-        text = (
-            f"⚜️ **Premium User Data:**\n\n"
-            f"👤 User: {message.from_user.first_name}\n"
-            f"⚡ User ID: {user_id}\n"
-            f"⏰ Time Left: {days} days, {hours} hours, {minutes} minutes\n"
-            f"⌛️ Expiry Date: {expiry_date}\n"
-            f"⏱️ Expiry Time: {expiry_time}\n\n"
-            f"📤 Daily Uploads Left: {remaining}"
-        )
+        text = (f"⚜️ **Premium**\n👤 {message.from_user.first_name}\n"
+                f"⏰ Time Left: {days}d {hours}h {minutes}m\n"
+                f"📤 Daily Uploads Left: {remaining}")
     else:
-        text = f"**Your Plan:** {plan.upper()}\n**Daily Uploads Left:** {remaining}"
+        text = f"**Plan:** {plan.upper()}\n**Daily Uploads Left:** {remaining}"
         if user.get("referral_rewards", 0) > 0:
             text += "\n\nType /upgrade to activate premium days."
     await message.reply(text)
@@ -404,20 +321,17 @@ async def upgrade_cmd(client, message):
     rewards = user.get("referral_rewards", 0)
     if rewards > 0:
         new_expiry = datetime.utcnow() + timedelta(days=rewards)
-        await users_col.update_one(
-            {"_id": user_id},
-            {"$set": {"plan": "premium", "premium_expiry": new_expiry, "referral_rewards": 0}}
-        )
-        await message.reply(f"🎉 Upgraded to Premium for {rewards} days! Enjoy 50 daily uploads.")
+        await users_col.update_one({"_id": user_id}, {"$set": {"plan": "premium", "premium_expiry": new_expiry, "referral_rewards": 0}})
+        await message.reply(f"🎉 Upgraded to Premium for {rewards} days!")
     else:
-        await message.reply("No reward days available. Invite friends using /referral to earn premium.")
+        await message.reply("No reward days available. Invite friends with /referral.")
 
 @app.on_message(filters.command("setfolder"))
 async def set_folder_cmd(client, message):
     user_id = message.from_user.id
     args = message.command
     if len(args) < 2:
-        await message.reply("Usage: /setfolder <google_drive_folder_url>")
+        await message.reply("Usage: /setfolder <folder_url>")
         return
     folder_url = args[1]
     folder_id, error = await validate_folder(user_id, folder_url)
@@ -433,7 +347,7 @@ async def remove_folder_cmd(client, message):
     await users_col.update_one({"_id": user_id}, {"$set": {"custom_folder_id": None}})
     await message.reply("✅ Custom folder removed. Uploads go to Drive root.")
 
-# ========== File Upload Handlers ==========
+# ========== File Upload Handlers (Part 2 continues) ==========
 async def process_file_upload(client, message, user, folder_id):
     user_id = message.from_user.id
     status_msg = await message.reply("⏳ Downloading file...")
@@ -442,13 +356,8 @@ async def process_file_upload(client, message, user, folder_id):
     try:
         task_id = str(uuid.uuid4())
         safe_progress = make_safe_progress_callback(status_msg, "⏳ Downloading file...", task_id)
-        file_path = await client.download_media(
-            message,
-            file_name=temp_path,
-            progress=safe_progress
-        )
+        file_path = await client.download_media(message, file_name=temp_path, progress=safe_progress)
         user_tasks.setdefault(user_id, {})[task_id] = asyncio.current_task()
-        # Get file details
         if message.document:
             filename = message.document.file_name
             file_size = message.document.file_size
@@ -469,14 +378,12 @@ async def process_file_upload(client, message, user, folder_id):
             file_size = 0
         size_mb = file_size / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
-        # Get active drive email (if set)
         active_email = user.get("active_drive")
         add_to_queue(user_id, file_path, filename, folder_id, status_msg.edit_text, email=active_email)
         await log_action(user_id, "upload", "queued", filename, size_mb)
     except asyncio.CancelledError:
         await status_msg.edit_text("❌ Upload cancelled.")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if os.path.exists(temp_path): os.remove(temp_path)
     except Exception as e:
         await status_msg.edit_text(f"❌ Download failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
@@ -487,7 +394,7 @@ async def handle_file(client, message):
     user = await get_user(user_id)
     drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     if not drives:
-        await message.reply("You have not logged in. Use /help to know how to log in.")
+        await message.reply("Not logged in. Use /log_in.")
         return
     allowed, msg = await check_quota(user_id)
     if not allowed:
@@ -508,7 +415,7 @@ async def upload_url_cmd(client, message):
     user = await get_user(user_id)
     drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     if not drives:
-        await message.reply("You have not logged in. Use /help to know how to log in.")
+        await message.reply("Not logged in.")
         return
     allowed, msg = await check_quota(user_id)
     if not allowed:
@@ -529,11 +436,10 @@ async def upload_url_cmd(client, message):
         add_to_queue(user_id, file_path, safe_filename, folder_id, status_msg.edit_text, email=active_email)
         await log_action(user_id, "upload", "queued", safe_filename, size_mb)
     except asyncio.CancelledError:
-        await status_msg.edit_text("❌ Upload cancelled.")
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        await status_msg.edit_text("❌ Cancelled.")
+        if os.path.exists(file_path): os.remove(file_path)
     except Exception as e:
-        await status_msg.edit_text(f"❌ Download failed: {str(e)}")
+        await status_msg.edit_text(f"❌ Failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
 
 @app.on_message(filters.command("yt"))
@@ -547,14 +453,14 @@ async def youtube_cmd(client, message):
     user = await get_user(user_id)
     drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
     if not drives:
-        await message.reply("You have not logged in. Use /help to know how to log in.")
+        await message.reply("Not logged in.")
         return
     allowed, msg = await check_quota(user_id)
     if not allowed:
         await message.reply(msg)
         return
     folder_id = user.get("custom_folder_id")
-    status_msg = await message.reply("⏳ Downloading YouTube video...")
+    status_msg = await message.reply("⏳ Downloading YouTube...")
     os.makedirs("downloads", exist_ok=True)
     temp_template = f"downloads/{user_id}_{uuid.uuid4()}_%(title)s.%(ext)s"
     try:
@@ -568,10 +474,98 @@ async def youtube_cmd(client, message):
         add_to_queue(user_id, final_path, filename, folder_id, status_msg.edit_text, email=active_email)
         await log_action(user_id, "upload", "queued", filename, size_mb)
     except asyncio.CancelledError:
-        await status_msg.edit_text("❌ Upload cancelled.")
+        await status_msg.edit_text("❌ Cancelled.")
     except Exception as e:
-        await status_msg.edit_text(f"❌ YouTube download failed: {str(e)}")
+        await status_msg.edit_text(f"❌ Failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
+
+# ========== Drive Download (getdrive) ==========
+async def _drive_download_progress(current, total, status_msg, task_id):
+    if total <= 0:
+        return
+    percent = (current * 100) // total
+    bar_length = 25
+    filled = int(bar_length * current // total)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    current_mb = current / (1024*1024)
+    total_mb = total / (1024*1024)
+    try:
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_dl_{task_id}")]])
+        await status_msg.edit_text(f"⏳ Downloading from Drive...\n\n[{bar}] {percent}%\n\n➡️ {current_mb:.1f} MB of {total_mb:.1f} MB", reply_markup=keyboard)
+    except:
+        pass
+
+async def download_drive_file(client, message, service, file_id, filename, file_size, status_msg):
+    user_id = message.from_user.id
+    os.makedirs("downloads", exist_ok=True)
+    temp_path = f"downloads/{user_id}_{uuid.uuid4()}_{filename}"
+    try:
+        task_id = str(uuid.uuid4())
+        def progress_sync(current, total):
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(_drive_download_progress(current, total, status_msg, task_id), loop)
+        async def download():
+            request = service.files().get_media(fileId=file_id)
+            with open(temp_path, "wb") as f:
+                downloader = MediaIoBaseDownload(f, request, chunksize=1024*1024*5)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+                    if status:
+                        progress_sync(status.resumable_progress, status.total_size)
+        await asyncio.to_thread(download)
+        await status_msg.edit_text("📤 Sending file to Telegram...")
+        await client.send_document(chat_id=user_id, document=temp_path, caption=f"✅ Downloaded from Drive: {filename}\n📏 Size: {os.path.getsize(temp_path)/1e6:.2f} MB")
+        await status_msg.delete()
+        os.remove(temp_path)
+    except asyncio.CancelledError:
+        await status_msg.edit_text("❌ Download cancelled.")
+        if os.path.exists(temp_path): os.remove(temp_path)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Download failed: {str(e)}")
+        if os.path.exists(temp_path): os.remove(temp_path)
+
+@app.on_message(filters.command("getdrive"))
+async def getdrive_cmd(client, message):
+    user_id = message.from_user.id
+    args = message.command
+    if len(args) < 2:
+        await message.reply("Usage: /getdrive <google_drive_link>\nExample: /getdrive https://drive.google.com/file/d/abc123/view")
+        return
+    drive_link = args[1]
+    patterns = [r"/file/d/([a-zA-Z0-9_-]+)", r"id=([a-zA-Z0-9_-]+)", r"open\?id=([a-zA-Z0-9_-]+)"]
+    file_id = None
+    for pattern in patterns:
+        match = re.search(pattern, drive_link)
+        if match:
+            file_id = match.group(1)
+            break
+    if not file_id:
+        await message.reply("❌ Invalid Google Drive link.")
+        return
+    user = await get_user(user_id)
+    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
+    if not drives:
+        await message.reply("Not logged in. Use /log_in.")
+        return
+    active_email = user.get("active_drive")
+    service = await get_drive_service(user_id, active_email)
+    if not service:
+        await message.reply("Authentication failed. Please /log_in again.")
+        return
+    status_msg = await message.reply("⏳ Fetching file info...")
+    try:
+        file_meta = await asyncio.to_thread(lambda: service.files().get(fileId=file_id, fields="name, size").execute())
+        filename = file_meta.get("name", "file.bin")
+        file_size = int(file_meta.get("size", 0))
+        size_mb = file_size / 1e6
+        if file_size > 50 * 1024 * 1024:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes", callback_data=f"confirm_dl_{file_id}_{filename}"), InlineKeyboardButton("❌ No", callback_data="cancel_dl")]])
+            await status_msg.edit_text(f"⚠️ File: {filename}\n📏 Size: {size_mb:.2f} MB\n\nProceed?", reply_markup=kb)
+            return
+        await download_drive_file(client, message, service, file_id, filename, file_size, status_msg)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Failed: {str(e)}")
 
 # ========== Callback Queries ==========
 @app.on_callback_query()
@@ -585,12 +579,22 @@ async def callback_handler(client, callback_query: CallbackQuery):
     elif data.startswith("setdrive_"):
         email = data[9:]
         await users_col.update_one({"_id": user_id}, {"$set": {"active_drive": email}})
-        await callback_query.message.edit_text(f"✅ Default drive set to {email}.\nNow all uploads will go to this account.")
+        await callback_query.message.edit_text(f"✅ Default drive set to {email}.")
     elif data.startswith("cancel_"):
         task_id = data[7:]
         if user_id in user_tasks and task_id in user_tasks[user_id]:
             user_tasks[user_id][task_id].cancel()
-            await callback_query.message.edit_text("❌ Operation cancelled.")
+            await callback_query.message.edit_text("❌ Cancelled.")
+    elif data.startswith("confirm_dl_"):
+        # For simplicity, ask to re-run command
+        await callback_query.message.edit_text("Please run /getdrive again with the link.")
+    elif data == "cancel_dl":
+        await callback_query.message.edit_text("❌ Cancelled.")
+    elif data.startswith("cancel_dl_"):
+        task_id = data[9:]
+        if user_id in user_tasks and task_id in user_tasks[user_id]:
+            user_tasks[user_id][task_id].cancel()
+            await callback_query.message.edit_text("❌ Cancelled.")
     await callback_query.answer()
 
 # ========== Admin Commands ==========
@@ -619,50 +623,27 @@ def parse_duration(duration_str):
 async def add_premium_cmd(client, message):
     args = message.text.split()
     if len(args) < 3:
-        await message.reply("Usage: /add <user_id> <duration>\nExample: /add 123456789 1 month")
+        await message.reply("Usage: /add <user_id> <duration> (e.g., 1 month)")
         return
     try:
         target_id = int(args[1])
     except:
-        await message.reply("❌ Invalid user ID.")
+        await message.reply("Invalid user ID.")
         return
     duration_str = " ".join(args[2:])
     delta = parse_duration(duration_str)
     if not delta:
-        await message.reply("❌ Invalid duration. Use: '1 day', '2 weeks', '1 month', '1 year'")
+        await message.reply("Invalid duration. Use: '1 day', '1 month', etc.")
         return
     user = await get_user(target_id)
     now = datetime.utcnow()
     new_expiry = now + delta
-    await users_col.update_one(
-        {"_id": target_id},
-        {"$set": {"premium_expiry": new_expiry, "plan": "premium"}}
-    )
+    await users_col.update_one({"_id": target_id}, {"$set": {"premium_expiry": new_expiry, "plan": "premium"}})
     try:
-        expiry_date = new_expiry.strftime("%d-%m-%Y")
-        expiry_time = new_expiry.strftime("%I:%M:%S %p")
-        join_date = now.strftime("%d-%m-%Y")
-        join_time = now.strftime("%I:%M:%S %p")
-        await client.send_message(
-            target_id,
-            f"⚜️ **Premium User Data:**\n\n"
-            f"👋 Hey {user.get('first_name', 'User')},\n"
-            f"Thank you for purchasing premium.\nEnjoy!! ✨🎉\n\n"
-            f"⏰ **Premium Access:** {duration_str}\n"
-            f"⏳ **Joining Date:** {join_date}\n"
-            f"⏱️ **Joining Time:** {join_time}\n\n"
-            f"⌛️ **Expiry Date:** {expiry_date}\n"
-            f"⏱️ **Expiry Time:** {expiry_time}\n\n"
-            f"**Daily Uploads Left:** 50 (Premium)"
-        )
+        await client.send_message(target_id, f"⚜️ **Premium Added!**\nYou now have premium for {duration_str}.\nEnjoy 50 daily uploads.")
     except:
         pass
-    await message.reply(
-        f"✅ Premium added successfully!\n\n"
-        f"👤 User ID: {target_id}\n"
-        f"⏰ Premium Access: {duration_str}\n"
-        f"⌛️ Expiry: {new_expiry.strftime('%Y-%m-%d %H:%M:%S')}"
-    )
+    await message.reply(f"✅ Premium added to {target_id} for {duration_str}.")
     await log_action(target_id, "admin_add_premium", "success", filename=f"duration:{duration_str}")
 
 @app.on_message(filters.command("rem") & filters.user(ADMIN_IDS))
@@ -674,13 +655,10 @@ async def remove_premium_cmd(client, message):
     try:
         target_id = int(args[1])
     except:
-        await message.reply("❌ Invalid user ID.")
+        await message.reply("Invalid user ID.")
         return
-    await users_col.update_one(
-        {"_id": target_id},
-        {"$set": {"premium_expiry": None, "plan": "free"}}
-    )
-    await message.reply(f"✅ Premium removed for user {target_id}.")
+    await users_col.update_one({"_id": target_id}, {"$set": {"premium_expiry": None, "plan": "free"}})
+    await message.reply(f"✅ Premium removed for {target_id}.")
     await log_action(target_id, "admin_remove_premium", "success")
 
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
