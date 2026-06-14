@@ -136,14 +136,22 @@ async def login_cmd(client, message):
 async def handle_file(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
+    
+    # ✅ Check if user has Google Drive connected
+    if not user.get("drive_tokens"):
+        await message.reply("❌ You need to connect your Google Drive first.\nUse /login to authenticate.")
+        return
+    
     allowed, msg = await check_quota(user_id)
     if not allowed:
         await message.reply(msg)
         return
+    
     folder_id = user.get("custom_folder_id")
     status_msg = await message.reply("⏳ Downloading file...")
     os.makedirs("downloads", exist_ok=True)
     temp_path = f"downloads/{user_id}_{uuid.uuid4()}.tmp"
+    
     try:
         file_path = await client.download_media(
             message,
@@ -151,32 +159,36 @@ async def handle_file(client, message):
             progress=progress_callback,
             progress_args=(status_msg, "⏳ Downloading file...")
         )
-        # Get filename
+        
+        # ✅ Safe filename extraction
         if message.document:
             filename = message.document.file_name
-        elif message.video:
-            filename = message.video.file_name or f"video_{message.id}.mp4"
-        elif message.audio:
-            filename = message.audio.file_name or f"audio_{message.id}.mp3"
-        elif message.photo:
-            filename = f"photo_{message.id}.jpg"
-        else:
-            filename = f"file_{message.id}"
-        # Get file size
-        if message.document:
             file_size = message.document.file_size
         elif message.video:
+            filename = message.video.file_name or f"video_{message.id}.mp4"
             file_size = message.video.file_size
         elif message.audio:
+            filename = message.audio.file_name or f"audio_{message.id}.mp3"
             file_size = message.audio.file_size
         elif message.photo:
-            file_size = message.photo[0].file_size
+            # ✅ message.photo is a list; take the first (largest) photo
+            if message.photo:
+                filename = f"photo_{message.id}.jpg"
+                file_size = message.photo[0].file_size
+            else:
+                raise Exception("No photo data")
+        elif message.voice:
+            filename = f"voice_{message.id}.ogg"
+            file_size = message.voice.file_size
         else:
+            filename = f"file_{message.id}"
             file_size = 0
+        
         size_mb = file_size / 1e6
         await status_msg.edit_text("📤 Queuing upload...")
         add_to_queue(user_id, file_path, filename, folder_id, status_msg.edit_text, status_msg.id)
         await log_action(user_id, "upload", "queued", filename, size_mb)
+        
     except Exception as e:
         await status_msg.edit_text(f"❌ Download failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
