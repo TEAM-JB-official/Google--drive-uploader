@@ -24,6 +24,7 @@ app = Client("gdrive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN
 import utils.logger
 utils.logger.bot_instance = app
 
+_download_pending = {}
 user_tasks = {}
 
 # ========== Helper Functions ==========
@@ -480,6 +481,9 @@ async def youtube_cmd(client, message):
         await log_action(user_id, "upload", "failed", error=str(e))
 
 # ========== Drive Download (getdrive) ==========
+# Temporary storage for large file confirmations
+_download_pending = {}
+
 async def _drive_download_progress(current, total, status_msg, task_id):
     if total <= 0:
         return
@@ -496,7 +500,7 @@ async def _drive_download_progress(current, total, status_msg, task_id):
         pass
 
 async def download_drive_file(client, message, service, file_id, filename, file_size, status_msg):
-    user_id = message.from_user.id
+    user_id = message.chat.id if hasattr(message, 'chat') else message.from_user.id
     os.makedirs("downloads", exist_ok=True)
     temp_path = f"downloads/{user_id}_{uuid.uuid4()}_{filename}"
     try:
@@ -560,8 +564,24 @@ async def getdrive_cmd(client, message):
         file_size = int(file_meta.get("size", 0))
         size_mb = file_size / 1e6
         if file_size > 50 * 1024 * 1024:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes", callback_data=f"confirm_dl_{file_id}_{filename}"), InlineKeyboardButton("❌ No", callback_data="cancel_dl")]])
-            await status_msg.edit_text(f"⚠️ File: {filename}\n📏 Size: {size_mb:.2f} MB\n\nProceed?", reply_markup=kb)
+            # Store confirmation data with a short token
+            token = str(uuid.uuid4())[:8]
+            _download_pending[token] = {
+                "file_id": file_id,
+                "filename": filename,
+                "file_size": file_size,
+                "user_id": user_id,
+                "active_email": active_email
+            }
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Yes", callback_data=f"confirm_dl_{token}"),
+                 InlineKeyboardButton("❌ No", callback_data="cancel_dl")]
+            ])
+            await status_msg.edit_text(
+                f"⚠️ File: {filename}\n📏 Size: {size_mb:.2f} MB\n\n"
+                f"Downloading this file may take some time. Proceed?",
+                reply_markup=kb
+            )
             return
         await download_drive_file(client, message, service, file_id, filename, file_size, status_msg)
     except Exception as e:
@@ -570,32 +590,76 @@ async def getdrive_cmd(client, message):
 # ========== Callback Queries ==========
 @app.on_callback_query()
 async def callback_handler(client, callback_query: CallbackQuery):
+    global _download_pending
     data = callback_query.data
     user_id = callback_query.from_user.id
+
+    # Logout from a specific account
     if data.startswith("logout_"):
         email = data[7:]
         await remove_drive_account(user_id, email)
         await callback_query.message.edit_text(f"✅ Logged out from {email}.")
+
+    # Set active drive account
     elif data.startswith("setdrive_"):
         email = data[9:]
         await users_col.update_one({"_id": user_id}, {"$set": {"active_drive": email}})
         await callback_query.message.edit_text(f"✅ Default drive set to {email}.")
+
+    # Cancel an ongoing upload/download task
     elif data.startswith("cancel_"):
         task_id = data[7:]
         if user_id in user_tasks and task_id in user_tasks[user_id]:
             user_tasks[user_id][task_id].cancel()
-            await callback_query.message.edit_text("❌ Cancelled.")
+            await callback_query.message.edit_text("❌ Operation cancelled.")
+
+    # Confirm large file download from Drive (short token)
     elif data.startswith("confirm_dl_"):
-        # For simplicity, ask to re-run command
-        await callback_query.message.edit_text("Please run /getdrive again with the link.")
+        token = data[11:]  # remove 'confirm_dl_'
+        if token in _download_pending:
+            info = _download_pending.pop(token)
+            # Verify the token belongs to this user
+            if info.get("user_id") != user_id:
+                await callback_query.message.edit_text("❌ This confirmation is not for you.")
+                await callback_query.answer()
+                return
+            # Re‑create Drive service
+            user = await get_user(user_id)
+            active_email = info.get("active_email")
+            service = await get_drive_service(user_id, active_email)
+            if not service:
+                await callback_query.message.edit_text("Authentication failed. Please /log_in again.")
+                await callback_query.answer()
+                return
+            # Start the download
+            await callback_query.message.edit_text("⏳ Starting download...")
+            await download_drive_file(
+                client,
+                callback_query.message,
+                service,
+                info["file_id"],
+                info["filename"],
+                info["file_size"],
+                callback_query.message
+            )
+        else:
+            await callback_query.message.edit_text("Invalid or expired confirmation. Please run /getdrive again.")
+        await callback_query.answer()
+
+    # Cancel download (generic)
     elif data == "cancel_dl":
-        await callback_query.message.edit_text("❌ Cancelled.")
+        await callback_query.message.edit_text("❌ Download cancelled.")
+        await callback_query.answer()
+
+    # Cancel a specific download task (with task_id)
     elif data.startswith("cancel_dl_"):
         task_id = data[9:]
         if user_id in user_tasks and task_id in user_tasks[user_id]:
             user_tasks[user_id][task_id].cancel()
-            await callback_query.message.edit_text("❌ Cancelled.")
-    await callback_query.answer()
+            await callback_query.message.edit_text("❌ Download cancelled.")
+
+    else:
+        await callback_query.answer("Unknown action")
 
 # ========== Admin Commands ==========
 def parse_duration(duration_str):
