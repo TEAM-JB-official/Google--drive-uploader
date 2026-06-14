@@ -3,7 +3,11 @@ import yt_dlp
 import asyncio
 import os
 
-async def download_http(url, dest_path, progress_callback=None, status_msg=None, text=""):
+async def download_http(url, dest_path, progress_callback=None):
+    """
+    Download a file from an HTTP/HTTPS URL.
+    progress_callback: a synchronous function that accepts (current, total)
+    """
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
@@ -15,15 +19,21 @@ async def download_http(url, dest_path, progress_callback=None, status_msg=None,
                     f.write(chunk)
                     downloaded += len(chunk)
                     if progress_callback and total:
-                        await progress_callback(downloaded, total, status_msg, text)
+                        progress_callback(downloaded, total)
     return dest_path
 
-async def download_youtube(url, dest_template, progress_callback=None, status_msg=None):
+async def download_youtube(url, dest_template, progress_callback=None):
+    """
+    Download a YouTube video using yt-dlp.
+    progress_callback: a synchronous function that accepts (downloaded_bytes, total_bytes)
+    """
     def progress_hook(d):
         if d['status'] == 'downloading':
             total = d.get('total_bytes', 1)
             downloaded = d.get('downloaded_bytes', 0)
-            asyncio.create_task(progress_callback(downloaded, total, status_msg, "⏳ Downloading YouTube..."))
+            if progress_callback and total:
+                progress_callback(downloaded, total)
+
     ydl_opts = {
         'outtmpl': dest_template,
         'format': 'bestvideo+bestaudio/best',
