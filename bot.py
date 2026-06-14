@@ -1,4 +1,3 @@
-import aiohttp   # add this if not already present
 import asyncio
 import os
 import uuid
@@ -7,6 +6,7 @@ import string
 import time
 import re
 import hashlib
+import aiohttp
 from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -202,14 +202,15 @@ async def mydrives_cmd(client, message):
 async def set_drive_cmd(client, message):
     user_id = message.from_user.id
     drives = await get_user_drives(user_id)
-    if not drives:
-        await message.reply("No linked accounts. Use /log_in first.")
+    valid_drives = [d for d in drives if "invalid" not in d.lower() and "re‑login" not in d.lower()]
+    if not valid_drives:
+        await message.reply("No valid linked accounts. Use /log_in first.")
         return
-    if len(drives) == 1:
-        await users_col.update_one({"_id": user_id}, {"$set": {"active_drive": drives[0]}})
-        await message.reply(f"✅ Default drive set to {drives[0]}")
+    if len(valid_drives) == 1:
+        await users_col.update_one({"_id": user_id}, {"$set": {"active_drive": valid_drives[0]}})
+        await message.reply(f"✅ Default drive set to {valid_drives[0]}")
         return
-    keyboard = [[InlineKeyboardButton(email, callback_data=f"setdrive_{email}")] for email in drives]
+    keyboard = [[InlineKeyboardButton(email, callback_data=f"setdrive_{email}")] for email in valid_drives]
     await message.reply("Select which Drive to use for uploads:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 @app.on_message(filters.command("showdrive"))
@@ -222,20 +223,11 @@ async def show_drive_cmd(client, message):
     else:
         await message.reply(f"✅ Current default drive: {active}")
 
-@app.on_message(filters.command("stats"))
-async def stats_cmd(client, message):
-    user_id = message.from_user.id
-    drives = await get_user_drives(user_id)
-    if not drives:
-        await message.reply("Not logged in. Use /log_in.")
-        return
-    email = drives[0]
-    if email is None or "invalid" in email.lower():
-        await message.reply("Token invalid. Please /log_in again.")
-        return
+# ========== Stats with multi-drive selection ==========
+async def show_drive_stats(client, message, user_id, email):
     stats = await get_drive_stats(user_id, email)
     if not stats:
-        await message.reply("Failed to fetch stats.")
+        await message.reply(f"Failed to fetch stats for {email}. Make sure your token is valid.")
         return
     total_gb = stats['total'] / (1024**3)
     used_gb = stats['used'] / (1024**3)
@@ -243,14 +235,32 @@ async def stats_cmd(client, message):
     free_gb = total_gb - used_gb
     bar, percent = format_storage_bar(used_gb, total_gb)
     await message.reply(
-        f"**Display Name:** {message.from_user.first_name}\n"
+        f"**Display Name:** {message.chat.first_name if hasattr(message.chat, 'first_name') else message.from_user.first_name}\n"
         f"**Email:** {email}\n\n"
         f"**Total Available:** {total_gb:.2f} GB\n"
         f"**Used:** {used_gb:.2f} GB\n"
         f"**Trash:** {trash_gb:.2f} GB\n"
         f"**Free:** {free_gb:.2f} GB\n\n"
         f"{bar} ({percent:.2f}%) used of {total_gb:.1f} GB."
-        )
+    )
+
+@app.on_message(filters.command("stats"))
+async def stats_cmd(client, message):
+    user_id = message.from_user.id
+    drives = await get_user_drives(user_id)
+    if not drives:
+        await message.reply("You have not logged in. Use /log_in.")
+        return
+    # Filter out invalid entries
+    valid_drives = [d for d in drives if "invalid" not in d.lower() and "re‑login" not in d.lower()]
+    if not valid_drives:
+        await message.reply("No valid drives found. Please /log_in again.")
+        return
+    if len(valid_drives) == 1:
+        await show_drive_stats(client, message, user_id, valid_drives[0])
+        return
+    keyboard = [[InlineKeyboardButton(email, callback_data=f"stats_{email}")] for email in valid_drives]
+    await message.reply("Select which Google Drive account to view stats for:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 @app.on_message(filters.command("account"))
 async def account_cmd(client, message):
@@ -429,7 +439,7 @@ async def upload_url_cmd(client, message):
     folder_id = user.get("custom_folder_id")
     status_msg = await message.reply("⏳ Downloading from URL...")
     os.makedirs("downloads", exist_ok=True)
-    # Use a very short filename: random suffix + extension
+    # Short filename
     name, ext = os.path.splitext(filename)
     short_name = f"{uuid.uuid4().hex[:8]}{ext}"
     file_path = f"downloads/{user_id}_{short_name}"
@@ -503,10 +513,9 @@ async def _drive_download_progress(current, total, status_msg, task_id):
 async def download_drive_file(client, message, service, file_id, original_filename, file_size, status_msg):
     user_id = message.chat.id if hasattr(message, 'chat') else message.from_user.id
     os.makedirs("downloads", exist_ok=True)
-    # Use a very short random filename (8 hex chars + extension)
     ext = os.path.splitext(original_filename)[1] or ".bin"
-    short_name = f"{uuid.uuid4().hex[:8]}{ext}"
-    temp_path = f"downloads/{user_id}_{short_name}"
+    random_name = f"{uuid.uuid4().hex[:8]}{ext}"
+    temp_path = f"downloads/{user_id}_{random_name}"
     try:
         task_id = str(uuid.uuid4())
         def progress_sync(current, total):
@@ -526,7 +535,7 @@ async def download_drive_file(client, message, service, file_id, original_filena
         await client.send_document(
             chat_id=user_id,
             document=temp_path,
-            caption=f"✅ Downloaded from Drive: **{original_filename}**\n📏 Size: {os.path.getsize(temp_path)/1e6:.2f} MB"
+            caption=f"✅ **Downloaded from Drive:**\n`{original_filename}`\n📏 Size: {os.path.getsize(temp_path)/1e6:.2f} MB"
         )
         await status_msg.delete()
         os.remove(temp_path)
@@ -537,113 +546,16 @@ async def download_drive_file(client, message, service, file_id, original_filena
         await status_msg.edit_text(f"❌ Download failed: {str(e)}")
         if os.path.exists(temp_path): os.remove(temp_path)
 
-@app.on_message(filters.command("getdrive"))
-async def getdrive_cmd(client, message):
-    user_id = message.from_user.id
-    args = message.command
-    if len(args) < 2:
-        await message.reply("Usage: /getdrive <google_drive_link>\nExample: /getdrive https://drive.google.com/file/d/abc123/view")
-        return
-    drive_link = args[1]
-    
-    # Extract file ID from various Google Drive link formats
-    patterns = [
-        r"/file/d/([a-zA-Z0-9_-]+)",
-        r"id=([a-zA-Z0-9_-]+)",
-        r"open\?id=([a-zA-Z0-9_-]+)",
-        r"uc\?id=([a-zA-Z0-9_-]+)",
-        r"folders/([a-zA-Z0-9_-]+)"
-    ]
-    file_id = None
-    for pattern in patterns:
-        match = re.search(pattern, drive_link)
-        if match:
-            file_id = match.group(1)
-            break
-    if not file_id:
-        await message.reply("❌ Could not extract file ID from the link.\nMake sure it's a valid Google Drive file link.")
-        return
-    
-    # Check if user is logged in
-    user = await get_user(user_id)
-    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
-    if not drives:
-        await message.reply("❌ You are not logged in. Use /log_in first.")
-        return
-    
-    active_email = user.get("active_drive")
-    if not active_email and drives:
-        active_email = drives[0].get("email")
-    try:
-        service = await get_drive_service(user_id, active_email)
-        if not service:
-            await message.reply("❌ Failed to authenticate with Google Drive. Please /log_in again.")
-            return
-        
-        status_msg = await message.reply("⏳ Fetching file information...")
-        
-        # Get file metadata
-        try:
-            file_meta = await asyncio.to_thread(
-                lambda: service.files().get(fileId=file_id, fields="name, size, mimeType").execute()
-            )
-        except Exception as e:
-            # If Drive API fails, try public download (no login required)
-            public_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-            await status_msg.edit_text("⚠️ File not found in your Drive. Attempting public download...")
-            await download_public_drive_file(client, message, public_url, file_id, status_msg)
-            return
-        
-        original_filename = file_meta.get("name", "file.bin")
-        file_size = int(file_meta.get("size", 0))
-        size_mb = file_size / 1e6
-        mime_type = file_meta.get("mimeType", "")
-        
-        # Check if it's a folder
-        if mime_type == "application/vnd.google-apps.folder":
-            await status_msg.edit_text("❌ This is a Google Drive folder. Downloading folders is not supported (only single files).")
-            return
-        
-        # For large files, ask for confirmation
-        display_name = original_filename[:40] + ("..." if len(original_filename) > 40 else "")
-        if file_size > 50 * 1024 * 1024:
-            token = str(uuid.uuid4())[:8]
-            _download_pending[token] = {
-                "file_id": file_id,
-                "filename": original_filename,
-                "file_size": file_size,
-                "user_id": user_id,
-                "active_email": active_email
-            }
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Yes", callback_data=f"confirm_dl_{token}"),
-                 InlineKeyboardButton("❌ No", callback_data="cancel_dl")]
-            ])
-            await status_msg.edit_text(
-                f"⚠️ File: {display_name}\n📏 Size: {size_mb:.2f} MB\n\n"
-                f"Downloading this file may take some time. Proceed?",
-                reply_markup=kb
-            )
-            return
-        
-        # Small file – download directly
-        await download_drive_file(client, message, service, file_id, original_filename, file_size, status_msg)
-        
-    except Exception as e:
-        await message.reply(f"❌ Failed: {str(e)}\n\nMake sure you have access to this file and are logged in.")
-
 async def download_public_drive_file(client, message, public_url, file_id, status_msg):
     """Download a file from a public Google Drive link without API authentication."""
     user_id = message.chat.id if hasattr(message, 'chat') else message.from_user.id
     os.makedirs("downloads", exist_ok=True)
-    
-    # Get filename from the public page first
+    # Get filename from the public page
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(public_url, allow_redirects=True) as resp:
                 if resp.status != 200:
                     raise Exception(f"HTTP {resp.status}")
-                # Try to get filename from Content-Disposition header
                 content_disp = resp.headers.get('Content-Disposition', '')
                 if 'filename=' in content_disp:
                     filename = content_disp.split('filename=')[1].strip('"')
@@ -651,14 +563,10 @@ async def download_public_drive_file(client, message, public_url, file_id, statu
                     filename = f"file_{file_id}.bin"
     except Exception as e:
         filename = f"file_{file_id}.bin"
-    
-    # Use extremely short random filename (8 chars + extension)
     ext = os.path.splitext(filename)[1] or ".bin"
     random_name = f"{uuid.uuid4().hex[:8]}{ext}"
     temp_path = f"downloads/{user_id}_{random_name}"
-    
     try:
-        # Download using direct public URL
         async with aiohttp.ClientSession() as session:
             async with session.get(public_url, allow_redirects=True) as resp:
                 if resp.status != 200:
@@ -670,11 +578,9 @@ async def download_public_drive_file(client, message, public_url, file_id, statu
                     async for chunk in resp.content.iter_chunked(1024*1024):
                         f.write(chunk)
                         downloaded += len(chunk)
-                        # Simple progress update
                         if total > 0:
                             percent = (downloaded * 100) // total
                             await status_msg.edit_text(f"⏳ Downloading public file... {percent}%")
-        
         await status_msg.edit_text("📤 Sending file to Telegram...")
         await client.send_document(
             chat_id=user_id,
@@ -685,9 +591,77 @@ async def download_public_drive_file(client, message, public_url, file_id, statu
         os.remove(temp_path)
     except Exception as e:
         await status_msg.edit_text(f"❌ Public download failed: {str(e)}")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-            
+        if os.path.exists(temp_path): os.remove(temp_path)
+
+@app.on_message(filters.command("getdrive"))
+async def getdrive_cmd(client, message):
+    user_id = message.from_user.id
+    args = message.command
+    if len(args) < 2:
+        await message.reply("Usage: /getdrive <google_drive_link>\nExample: /getdrive https://drive.google.com/file/d/abc123/view")
+        return
+    drive_link = args[1]
+    patterns = [r"/file/d/([a-zA-Z0-9_-]+)", r"id=([a-zA-Z0-9_-]+)", r"open\?id=([a-zA-Z0-9_-]+)", r"uc\?id=([a-zA-Z0-9_-]+)"]
+    file_id = None
+    for p in patterns:
+        m = re.search(p, drive_link)
+        if m:
+            file_id = m.group(1)
+            break
+    if not file_id:
+        await message.reply("❌ Could not extract file ID from the link.")
+        return
+    # Try public download first (works for any publicly shared file)
+    public_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    status_msg = await message.reply("⏳ Attempting public download...")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.head(public_url, allow_redirects=True) as resp:
+                if resp.status == 200:
+                    await download_public_drive_file(client, message, public_url, file_id, status_msg)
+                    return
+                else:
+                    await status_msg.edit_text("⚠️ File not public. Trying with your logged-in account...")
+    except:
+        await status_msg.edit_text("⚠️ File not public. Trying with your logged-in account...")
+    # If not public, try authenticated Drive API
+    user = await get_user(user_id)
+    drives = [d for d in user.get("drive_tokens", []) if isinstance(d, dict)]
+    if not drives:
+        await status_msg.edit_text("❌ Not logged in. Use /log_in first.")
+        return
+    active_email = user.get("active_drive") or drives[0].get("email")
+    try:
+        service = await get_drive_service(user_id, active_email)
+        if not service:
+            await status_msg.edit_text("❌ Drive authentication failed. Re‑login with /log_in.")
+            return
+        await status_msg.edit_text("⏳ Fetching file info from your Drive...")
+        file_meta = await asyncio.to_thread(lambda: service.files().get(fileId=file_id, fields="name, size, mimeType").execute())
+        original_filename = file_meta.get("name", "file.bin")
+        file_size = int(file_meta.get("size", 0))
+        size_mb = file_size / 1e6
+        mime_type = file_meta.get("mimeType", "")
+        if mime_type == "application/vnd.google-apps.folder":
+            await status_msg.edit_text("❌ Folders are not supported.")
+            return
+        display_name = original_filename[:40] + ("..." if len(original_filename) > 40 else "")
+        if file_size > 50 * 1024 * 1024:
+            token = str(uuid.uuid4())[:8]
+            _download_pending[token] = {
+                "file_id": file_id,
+                "filename": original_filename,
+                "file_size": file_size,
+                "user_id": user_id,
+                "active_email": active_email
+            }
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Yes", callback_data=f"confirm_dl_{token}"), InlineKeyboardButton("❌ No", callback_data="cancel_dl")]])
+            await status_msg.edit_text(f"⚠️ File: {display_name}\n📏 Size: {size_mb:.2f} MB\n\nProceed?", reply_markup=kb)
+            return
+        await download_drive_file(client, message, service, file_id, original_filename, file_size, status_msg)
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Failed to download from your Drive: {str(e)}\n\nMake sure the file is either public or shared with your account.")
+
 # ========== Callback Queries ==========
 @app.on_callback_query()
 async def callback_handler(client, callback_query: CallbackQuery):
@@ -708,6 +682,11 @@ async def callback_handler(client, callback_query: CallbackQuery):
         email = data[9:]
         await users_col.update_one({"_id": user_id}, {"$set": {"active_drive": email}})
         await safe_edit(callback_query.message, f"✅ Default drive set to **{email}**.\nNow all uploads will go to this account.")
+
+    elif data.startswith("stats_"):
+        email = data[6:]
+        await show_drive_stats(client, callback_query.message, user_id, email)
+        await callback_query.answer()
 
     elif data.startswith("cancel_"):
         task_id = data[7:]
