@@ -26,53 +26,82 @@ async def migrate_old_tokens(user_id):
     changed = False
     for item in tokens:
         if isinstance(item, str):
-            # Old format: just token string
-            new_tokens.append({"email": "unknown@old.token", "token": item})
+            # Old format: just token string – cannot recover, so we remove it
+            # But to avoid data loss, we keep as invalid – user must re‑login
+            new_tokens.append({"email": "invalid_old_token", "token": item})
             changed = True
         elif isinstance(item, dict):
+            # Already new format – but ensure the "token" field is a dict
+            if "token" in item and isinstance(item["token"], str):
+                # token stored as string – convert to dummy dict (invalid)
+                item["token"] = {"invalid": True}
+                changed = True
+            new_tokens.append(item)
+        else:
+            # unknown type
             new_tokens.append(item)
     if changed:
         await users_col.update_one({"_id": user_id}, {"$set": {"drive_tokens": new_tokens}})
 
 async def get_drive_service(user_id, email=None):
+    # First, ensure old tokens are migrated
+    await migrate_old_tokens(user_id)
     user = await users_col.find_one({"_id": user_id})
     if not user:
         return None
-    await migrate_old_tokens(user_id)
-    user = await users_col.find_one({"_id": user_id})
     drives = user.get("drive_tokens", [])
     if not drives:
         return None
-    # Filter only dict items
-    dict_drives = [d for d in drives if isinstance(d, dict)]
-    if not dict_drives:
+    # Filter only dict items that have a proper "token" dict
+    valid_drives = []
+    for d in drives:
+        if not isinstance(d, dict):
+            continue
+        token_data = d.get("token")
+        if not isinstance(token_data, dict):
+            # token is not a dict – invalid
+            continue
+        # Check if required keys exist (minimal)
+        if "token" in token_data:
+            valid_drives.append(d)
+    if not valid_drives:
         return None
     if email:
-        for d in dict_drives:
+        selected = None
+        for d in valid_drives:
             if d.get("email") == email:
-                creds_dict = d["token"]
+                selected = d
                 break
-        else:
+        if not selected:
             return None
+        creds_dict = selected["token"]
     else:
-        creds_dict = dict_drives[0]["token"]
-    creds = Credentials.from_authorized_user_info(creds_dict)
+        creds_dict = valid_drives[0]["token"]
+    # Build Credentials object
+    try:
+        creds = Credentials.from_authorized_user_info(creds_dict)
+    except Exception:
+        # Invalid token – remove this drive entry
+        for i, d in enumerate(drives):
+            if d.get("token") == creds_dict:
+                drives.pop(i)
+                await users_col.update_one({"_id": user_id}, {"$set": {"drive_tokens": drives}})
+                break
+        return None
     if creds.expired and creds.refresh_token:
         def refresh():
             creds.refresh(GoogleRequest())
         await asyncio.to_thread(refresh)
         # update stored token
-        for i, d in enumerate(dict_drives):
+        for i, d in enumerate(valid_drives):
             if d.get("email") == email or (email is None and i == 0):
-                dict_drives[i]["token"] = creds_to_dict(creds)
-                # Merge back into drives list
-                new_drives = []
-                for old in user.get("drive_tokens", []):
-                    if isinstance(old, dict) and old.get("email") == dict_drives[i]["email"]:
-                        new_drives.append(dict_drives[i])
-                    else:
-                        new_drives.append(old)
-                await users_col.update_one({"_id": user_id}, {"$set": {"drive_tokens": new_drives}})
+                d["token"] = creds_to_dict(creds)
+                # Update in the original drives list
+                for j, od in enumerate(drives):
+                    if isinstance(od, dict) and od.get("email") == d.get("email"):
+                        drives[j] = d
+                        break
+                await users_col.update_one({"_id": user_id}, {"$set": {"drive_tokens": drives}})
                 break
     return build("drive", "v3", credentials=creds)
 
@@ -89,47 +118,46 @@ async def get_drive_stats(user_id, email=None):
         used = int(quota.get("usage", 0))
         trash = int(quota.get("usageInTrash", 0))
         return {"total": total, "used": used, "trash": trash}
-    except:
+    except Exception:
         return None
 
 async def add_drive_account(user_id, creds_dict, email):
     user = await users_col.find_one({"_id": user_id})
     await migrate_old_tokens(user_id)
     drives = user.get("drive_tokens", [])
-    # replace if email exists
-    replaced = False
-    for i, d in enumerate(drives):
-        if isinstance(d, dict) and d.get("email") == email:
-            drives[i] = {"email": email, "token": creds_dict}
-            replaced = True
-            break
-    if not replaced:
-        drives.append({"email": email, "token": creds_dict})
+    # remove any existing entry with same email
+    drives = [d for d in drives if not (isinstance(d, dict) and d.get("email") == email)]
+    drives.append({"email": email, "token": creds_dict})
     await users_col.update_one({"_id": user_id}, {"$set": {"drive_tokens": drives}})
 
 async def remove_drive_account(user_id, email):
     user = await users_col.find_one({"_id": user_id})
     drives = user.get("drive_tokens", [])
-    new_drives = [d for d in drives if not (isinstance(d, dict) and d.get("email") == email)]
-    await users_col.update_one({"_id": user_id}, {"$set": {"drive_tokens": new_drives}})
+    drives = [d for d in drives if not (isinstance(d, dict) and d.get("email") == email)]
+    await users_col.update_one({"_id": user_id}, {"$set": {"drive_tokens": drives}})
 
 async def get_user_drives(user_id):
-    user = await users_col.find_one({"_id": user_id})
     await migrate_old_tokens(user_id)
     user = await users_col.find_one({"_id": user_id})
     tokens = user.get("drive_tokens", [])
     emails = []
     for item in tokens:
         if isinstance(item, dict):
-            emails.append(item.get("email", "Unknown"))
+            email = item.get("email")
+            # Check if token is valid (has required keys)
+            token_data = item.get("token")
+            if isinstance(token_data, dict) and "token" in token_data:
+                emails.append(email)
+            else:
+                emails.append(f"{email} (invalid, re‑login needed)")
         elif isinstance(item, str):
-            emails.append("Unknown (old token)")
+            emails.append("Old token (re‑login needed)")
     return emails
 
 async def upload_file_to_drive(user_id, file_path, filename, folder_id=None, email=None):
     service = await get_drive_service(user_id, email)
     if not service:
-        return None, "No linked Google account. Use /log_in first."
+        return None, "No valid Google Drive account. Please use /log_in again."
     media = MediaFileUpload(file_path, resumable=True, chunksize=1024*1024*5)
     file_metadata = {"name": filename}
     if folder_id:
@@ -151,7 +179,7 @@ async def validate_folder(user_id, folder_url, email=None):
     folder_id = match.group(1)
     service = await get_drive_service(user_id, email)
     if not service:
-        return None, "No linked Google account"
+        return None, "No valid Google Drive account. Please use /log_in again."
     try:
         def get_folder():
             service.files().get(fileId=folder_id, fields="id").execute()
