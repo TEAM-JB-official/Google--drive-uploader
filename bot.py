@@ -18,6 +18,7 @@ app = Client("gdrive_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN
 import utils.logger
 utils.logger.bot_instance = app
 
+# ========== Helper Functions ==========
 async def get_user(user_id):
     user = await users_col.find_one({"_id": user_id})
     if not user:
@@ -80,6 +81,7 @@ def format_expiry(expiry_dt):
     minutes = (delta.seconds % 3600) // 60
     return f"{days} days, {hours} hours, {minutes} minutes"
 
+# ========== User Commands ==========
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message: Message):
     user_id = message.from_user.id
@@ -137,9 +139,9 @@ async def handle_file(client, message):
     user_id = message.from_user.id
     user = await get_user(user_id)
     
-    # ✅ Check if user has Google Drive connected
+    # Check if user has Google Drive connected
     if not user.get("drive_tokens"):
-        await message.reply("❌ You need to connect your Google Drive first.\nUse /login to authenticate.")
+        await message.reply("❌ **Google Drive not connected!**\n\nPlease use /login to authenticate your Google Drive first.")
         return
     
     allowed, msg = await check_quota(user_id)
@@ -160,7 +162,7 @@ async def handle_file(client, message):
             progress_args=(status_msg, "⏳ Downloading file...")
         )
         
-        # ✅ Safe filename extraction
+        # Safely extract filename and size
         if message.document:
             filename = message.document.file_name
             file_size = message.document.file_size
@@ -171,12 +173,12 @@ async def handle_file(client, message):
             filename = message.audio.file_name or f"audio_{message.id}.mp3"
             file_size = message.audio.file_size
         elif message.photo:
-            # ✅ message.photo is a list; take the first (largest) photo
-            if message.photo:
-                filename = f"photo_{message.id}.jpg"
-                file_size = message.photo[0].file_size
+            filename = f"photo_{message.id}.jpg"
+            # Handle both list and single object
+            if hasattr(message.photo, '__iter__') and not isinstance(message.photo, str):
+                file_size = message.photo[0].file_size if message.photo else 0
             else:
-                raise Exception("No photo data")
+                file_size = getattr(message.photo, 'file_size', 0)
         elif message.voice:
             filename = f"voice_{message.id}.ogg"
             file_size = message.voice.file_size
@@ -193,111 +195,6 @@ async def handle_file(client, message):
         await status_msg.edit_text(f"❌ Download failed: {str(e)}")
         await log_action(user_id, "upload", "failed", error=str(e))
 
-# ... (other command handlers: upload_url_cmd, youtube_cmd, setfolder, removefolder, stats, account, referral, broadcast) ...
-# Keep them exactly as in the previous full version, they are unchanged.
-
-# ==================== PREMIUM ADMIN COMMANDS ====================
-
-@app.on_message(filters.command("add") & filters.user(ADMIN_IDS))
-async def add_premium_cmd(client, message):
-    args = message.text.split()
-    if len(args) < 3:
-        await message.reply("Usage: /add <user_id> <duration>\nExample: /add 123456789 1 month")
-        return
-    try:
-        target_id = int(args[1])
-    except:
-        await message.reply("❌ Invalid user ID.")
-        return
-    duration_str = " ".join(args[2:])
-    delta = parse_duration(duration_str)
-    if not delta:
-        await message.reply("❌ Invalid duration. Use: '1 day', '2 weeks', '1 month', '1 year'")
-        return
-    user = await get_user(target_id)
-    now = datetime.utcnow()
-    new_expiry = now + delta
-    await users_col.update_one(
-        {"_id": target_id},
-        {"$set": {"premium_expiry": new_expiry, "plan": "premium"}}
-    )
-    # Send notification to user
-    try:
-        expiry_date = new_expiry.strftime("%d-%m-%Y")
-        expiry_time = new_expiry.strftime("%I:%M:%S %p")
-        join_date = now.strftime("%d-%m-%Y")
-        join_time = now.strftime("%I:%M:%S %p")
-        await client.send_message(
-            target_id,
-            f"⚜️ **Premium User Data:**\n\n"
-            f"👋 Hey {user.get('first_name', 'User')},\n"
-            f"Thank you for purchasing premium.\nEnjoy!! ✨🎉\n\n"
-            f"⏰ **Premium Access:** {duration_str}\n"
-            f"⏳ **Joining Date:** {join_date}\n"
-            f"⏱️ **Joining Time:** {join_time}\n\n"
-            f"⌛️ **Expiry Date:** {expiry_date}\n"
-            f"⏱️ **Expiry Time:** {expiry_time}\n\n"
-            f"**Daily Uploads Left:** 50 (Premium)"
-        )
-    except:
-        pass
-    # Reply to admin
-    await message.reply(
-        f"✅ Premium added successfully!\n\n"
-        f"👤 User ID: {target_id}\n"
-        f"⏰ Premium Access: {duration_str}\n"
-        f"⌛️ Expiry: {new_expiry.strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-    await log_action(target_id, "admin_add_premium", "success", filename=f"duration:{duration_str}")
-
-@app.on_message(filters.command("rem") & filters.user(ADMIN_IDS))
-async def remove_premium_cmd(client, message):
-    args = message.text.split()
-    if len(args) < 2:
-        await message.reply("Usage: /rem <user_id>")
-        return
-    try:
-        target_id = int(args[1])
-    except:
-        await message.reply("❌ Invalid user ID.")
-        return
-    await users_col.update_one(
-        {"_id": target_id},
-        {"$set": {"premium_expiry": None, "plan": "free"}}
-    )
-    await message.reply(f"✅ Premium removed for user {target_id}.")
-    await log_action(target_id, "admin_remove_premium", "success")
-
-# Override /myplan to show expiry and time left
-@app.on_message(filters.command("myplan"))
-async def myplan_cmd(client, message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    plan = user.get("plan", "free")
-    expiry = user.get("premium_expiry")
-    remaining = await get_remaining_uploads(user_id)
-    if plan == "premium" and expiry and expiry > datetime.utcnow():
-        time_left = format_expiry(expiry)
-        expiry_date = expiry.strftime("%d-%m-%Y")
-        expiry_time = expiry.strftime("%I:%M:%S %p")
-        text = (
-            f"⚜️ **Premium User Data:**\n\n"
-            f"👤 User: {message.from_user.first_name}\n"
-            f"⚡ User ID: {user_id}\n"
-            f"⏰ Time Left: {time_left}\n"
-            f"⌛️ Expiry Date: {expiry_date}\n"
-            f"⏱️ Expiry Time: {expiry_time}\n\n"
-            f"📤 Daily Uploads Left: {remaining}"
-        )
-    else:
-        text = f"**Your Plan:** {plan.upper()}\n**Daily Uploads Left:** {remaining}"
-        if user.get("referral_rewards", 0) > 0:
-            text += "\n\nType /upgrade to activate premium days."
-    await message.reply(text)
-
-# ========== Keep the rest of your command handlers (upload_url_cmd, youtube_cmd, setfolder, etc.) ==========
-# They are identical to the previous version. I'll copy them below.
-
 @app.on_message(filters.command("upload"))
 async def upload_url_cmd(client, message):
     user_id = message.from_user.id
@@ -308,6 +205,12 @@ async def upload_url_cmd(client, message):
     url = args[1]
     filename = args[2] if len(args) > 2 else url.split('/')[-1].split('?')[0] or "file"
     user = await get_user(user_id)
+    
+    # Check if user has Google Drive connected
+    if not user.get("drive_tokens"):
+        await message.reply("❌ **Google Drive not connected!**\n\nPlease use /login to authenticate your Google Drive first.")
+        return
+    
     allowed, msg = await check_quota(user_id)
     if not allowed:
         await message.reply(msg)
@@ -336,6 +239,12 @@ async def youtube_cmd(client, message):
         return
     url = args[1]
     user = await get_user(user_id)
+    
+    # Check if user has Google Drive connected
+    if not user.get("drive_tokens"):
+        await message.reply("❌ **Google Drive not connected!**\n\nPlease use /login to authenticate your Google Drive first.")
+        return
+    
     allowed, msg = await check_quota(user_id)
     if not allowed:
         await message.reply(msg)
@@ -407,6 +316,117 @@ async def referral_cmd(client, message):
     bot_username = (await client.get_me()).username
     link = f"https://t.me/{bot_username}?start=ref_{code}"
     await message.reply(f"Your referral link:\n{link}\n\nFor every 3 friends who join, you get 7 days of premium!")
+
+@app.on_message(filters.command("myplan"))
+async def myplan_cmd(client, message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    plan = user.get("plan", "free")
+    expiry = user.get("premium_expiry")
+    remaining = await get_remaining_uploads(user_id)
+    if plan == "premium" and expiry and expiry > datetime.utcnow():
+        time_left = format_expiry(expiry)
+        expiry_date = expiry.strftime("%d-%m-%Y")
+        expiry_time = expiry.strftime("%I:%M:%S %p")
+        text = (
+            f"⚜️ **Premium User Data:**\n\n"
+            f"👤 User: {message.from_user.first_name}\n"
+            f"⚡ User ID: {user_id}\n"
+            f"⏰ Time Left: {time_left}\n"
+            f"⌛️ Expiry Date: {expiry_date}\n"
+            f"⏱️ Expiry Time: {expiry_time}\n\n"
+            f"📤 Daily Uploads Left: {remaining}"
+        )
+    else:
+        text = f"**Your Plan:** {plan.upper()}\n**Daily Uploads Left:** {remaining}"
+        if user.get("referral_rewards", 0) > 0:
+            text += "\n\nType /upgrade to activate premium days."
+    await message.reply(text)
+
+@app.on_message(filters.command("upgrade"))
+async def upgrade_cmd(client, message):
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    rewards = user.get("referral_rewards", 0)
+    if rewards > 0:
+        new_expiry = datetime.utcnow() + timedelta(days=rewards)
+        await users_col.update_one(
+            {"_id": user_id},
+            {"$set": {"plan": "premium", "premium_expiry": new_expiry, "referral_rewards": 0}}
+        )
+        await message.reply(f"🎉 Upgraded to Premium for {rewards} days! Enjoy 50 daily uploads.")
+    else:
+        await message.reply("No reward days available. Invite friends using /referral to earn premium.")
+
+# ========== Admin Commands ==========
+@app.on_message(filters.command("add") & filters.user(ADMIN_IDS))
+async def add_premium_cmd(client, message):
+    args = message.text.split()
+    if len(args) < 3:
+        await message.reply("Usage: /add <user_id> <duration>\nExample: /add 123456789 1 month")
+        return
+    try:
+        target_id = int(args[1])
+    except:
+        await message.reply("❌ Invalid user ID.")
+        return
+    duration_str = " ".join(args[2:])
+    delta = parse_duration(duration_str)
+    if not delta:
+        await message.reply("❌ Invalid duration. Use: '1 day', '2 weeks', '1 month', '1 year'")
+        return
+    user = await get_user(target_id)
+    now = datetime.utcnow()
+    new_expiry = now + delta
+    await users_col.update_one(
+        {"_id": target_id},
+        {"$set": {"premium_expiry": new_expiry, "plan": "premium"}}
+    )
+    # Send notification to user
+    try:
+        expiry_date = new_expiry.strftime("%d-%m-%Y")
+        expiry_time = new_expiry.strftime("%I:%M:%S %p")
+        join_date = now.strftime("%d-%m-%Y")
+        join_time = now.strftime("%I:%M:%S %p")
+        await client.send_message(
+            target_id,
+            f"⚜️ **Premium User Data:**\n\n"
+            f"👋 Hey {message.from_user.first_name},\n"
+            f"Thank you for purchasing premium.\nEnjoy!! ✨🎉\n\n"
+            f"⏰ **Premium Access:** {duration_str}\n"
+            f"⏳ **Joining Date:** {join_date}\n"
+            f"⏱️ **Joining Time:** {join_time}\n\n"
+            f"⌛️ **Expiry Date:** {expiry_date}\n"
+            f"⏱️ **Expiry Time:** {expiry_time}\n\n"
+            f"**Daily Uploads Left:** 50 (Premium)"
+        )
+    except:
+        pass
+    await message.reply(
+        f"✅ Premium added successfully!\n\n"
+        f"👤 User ID: {target_id}\n"
+        f"⏰ Premium Access: {duration_str}\n"
+        f"⌛️ Expiry: {new_expiry.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    await log_action(target_id, "admin_add_premium", "success", filename=f"duration:{duration_str}")
+
+@app.on_message(filters.command("rem") & filters.user(ADMIN_IDS))
+async def remove_premium_cmd(client, message):
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Usage: /rem <user_id>")
+        return
+    try:
+        target_id = int(args[1])
+    except:
+        await message.reply("❌ Invalid user ID.")
+        return
+    await users_col.update_one(
+        {"_id": target_id},
+        {"$set": {"premium_expiry": None, "plan": "free"}}
+    )
+    await message.reply(f"✅ Premium removed for user {target_id}.")
+    await log_action(target_id, "admin_remove_premium", "success")
 
 @app.on_message(filters.command("broadcast") & filters.user(ADMIN_IDS))
 async def broadcast_cmd(client, message):
