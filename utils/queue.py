@@ -17,7 +17,6 @@ async def worker(user_id):
     queue = user_queues[user_id]
     while True:
         task = await queue.get()
-        # task = (task_id, file_path, filename, folder_id, reply_func, start_time, email)
         task_id, file_path, filename, folder_id, reply_func, start_time, email = task
         async with sem:
             link, error = await upload_file_to_drive(user_id, file_path, filename, folder_id, email=email)
