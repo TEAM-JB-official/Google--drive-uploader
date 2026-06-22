@@ -75,6 +75,7 @@ async def _progress_coro(current, total, status_msg, text, task_id):
             if not hasattr(_progress_coro, 'last_update'):
                 _progress_coro.last_update = {}
             last = _progress_coro.last_update.get(task_id, 0)
+            # Update only if > 1 MB change to avoid rate limits
             if current_mb - last < 1.0 and current > 0:
                 return
             _progress_coro.last_update[task_id] = current_mb
