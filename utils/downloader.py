@@ -20,21 +20,23 @@ async def download_http(url, dest_path, progress_callback=None):
 
 async def download_youtube(url, dest_template, progress_callback=None):
     """
-    YouTube downloader with memory optimisation and cookies support.
+    YouTube downloader with memory optimisation, cookies support, and progress.
     progress_callback: sync function (downloaded_bytes, total_bytes)
     """
     def progress_hook(d):
         if d['status'] == 'downloading':
             total = d.get('total_bytes', 1)
             downloaded = d.get('downloaded_bytes', 0)
-            if progress_callback and total:
+            if progress_callback:
+                # Call the sync callback (will schedule async update)
                 progress_callback(downloaded, total)
 
     cookies_arg = {"cookiefile": "cookies.txt"} if os.path.exists("cookies.txt") else {}
 
+    # Use 720p to reduce memory and processing
     ydl_opts = {
         'outtmpl': dest_template,
-        'format': 'bestvideo+bestaudio/best',
+        'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
         'merge_output_format': 'mp4',
         'quiet': True,
         'no_warnings': True,
@@ -43,8 +45,9 @@ async def download_youtube(url, dest_template, progress_callback=None):
         'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
         'extractor_args': {'youtube': {'player_client': ['android'], 'skip': ['hls', 'dash']}},
         'progress_hooks': [progress_hook] if progress_callback else [],
-        'concurrent_fragment_downloads': 1,   # reduce memory usage
+        'concurrent_fragment_downloads': 1,   # reduce memory
         'cache': False,
+        'throttledratelimit': 100000000,
         **cookies_arg,
     }
     def run():
