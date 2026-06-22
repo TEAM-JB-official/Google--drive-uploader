@@ -71,12 +71,23 @@ def make_safe_progress_callback(status_msg, text, task_id):
 async def _progress_coro(current, total, status_msg, text, task_id):
     try:
         if total <= 0:
-            # Show only downloaded MB if total unknown
             current_mb = current / (1024*1024)
+            if not hasattr(_progress_coro, 'last_update'):
+                _progress_coro.last_update = {}
+            last = _progress_coro.last_update.get(task_id, 0)
+            if current_mb - last < 1.0 and current > 0:
+                return
+            _progress_coro.last_update[task_id] = current_mb
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{task_id}")]]) if task_id else None
             await status_msg.edit_text(f"{text}\n⬇️ Downloaded: {current_mb:.1f} MB", reply_markup=keyboard)
             return
         percent = (current * 100) // total
+        if not hasattr(_progress_coro, 'last_percent'):
+            _progress_coro.last_percent = {}
+        last = _progress_coro.last_percent.get(task_id, -1)
+        if percent == last and current > 0:
+            return
+        _progress_coro.last_percent[task_id] = percent
         bar = "█" * (percent // 5) + "░" * (20 - (percent // 5))
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{task_id}")]]) if task_id else None
         await status_msg.edit_text(f"{text}\n[{bar}] {percent}%", reply_markup=keyboard)
@@ -104,6 +115,8 @@ def get_quota_reset_time(user):
     delta = reset_dt - datetime.utcnow()
     return str(timedelta(seconds=delta.total_seconds())).split('.')[0]
 
+# ... rest of Part 1 (start, help, login, logout, mydrives, setdrive, showdrive, stats, account, referral, myplan, upgrade, setfolder, removefolder) remains unchanged ...
+# Continue with your existing Part 1 commands (they are unchanged)
 # ========== User Commands ==========
 @app.on_message(filters.command("start"))
 async def start_cmd(client, message: Message):
