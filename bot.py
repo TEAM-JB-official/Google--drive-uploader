@@ -29,6 +29,11 @@ utils.logger.bot_instance = app
 user_tasks = {}
 _download_pending = {}
 
+def ensure_user_tasks():
+    global user_tasks
+    if user_tasks is None:
+        user_tasks = {}
+
 # ========== Helper Functions ==========
 async def get_user(user_id):
     user = await users_col.find_one({"_id": user_id})
@@ -365,11 +370,10 @@ async def remove_folder_cmd(client, message):
     await users_col.update_one({"_id": user_id}, {"$set": {"custom_folder_id": None}})
     await message.reply("✅ Custom folder removed. Uploads go to Drive root.")
 
+
 # ========== File Upload Handlers ==========
 async def process_file_upload(client, message, user, folder_id):
-    global user_tasks
-    if user_tasks is None:
-        user_tasks = {}
+    ensure_user_tasks()
     user_id = message.from_user.id
     status_msg = await message.reply("⏳ Downloading file...")
     os.makedirs("downloads", exist_ok=True)
@@ -436,9 +440,7 @@ async def handle_file(client, message):
 
 @app.on_message(filters.command("upload"))
 async def upload_url_cmd(client, message):
-    global user_tasks
-    if user_tasks is None:
-        user_tasks = {}
+    ensure_user_tasks()
     user_id = message.from_user.id
     args = message.command
     if len(args) < 2:
@@ -479,9 +481,7 @@ async def upload_url_cmd(client, message):
 
 @app.on_message(filters.command("yt"))
 async def youtube_cmd(client, message):
-    global user_tasks
-    if user_tasks is None:
-        user_tasks = {}
+    ensure_user_tasks()
     user_id = message.from_user.id
     args = message.command
     if len(args) < 2:
@@ -532,9 +532,7 @@ async def _drive_download_progress(current, total, status_msg, task_id):
         pass
 
 async def download_drive_file(client, message, service, file_id, original_filename, file_size, status_msg):
-    global user_tasks
-    if user_tasks is None:
-        user_tasks = {}
+    ensure_user_tasks()
     user_id = message.chat.id if hasattr(message, 'chat') else message.from_user.id
     os.makedirs("downloads", exist_ok=True)
     ext = os.path.splitext(original_filename)[1] or ".bin"
@@ -641,9 +639,7 @@ async def download_public_drive_file(client, message, file_id, status_msg):
 
 @app.on_message(filters.command("getdrive"))
 async def getdrive_cmd(client, message):
-    global user_tasks
-    if user_tasks is None:
-        user_tasks = {}
+    ensure_user_tasks()
     user_id = message.from_user.id
     args = message.command
     if len(args) < 2:
@@ -706,9 +702,8 @@ async def getdrive_cmd(client, message):
 # ========== Callback Queries ==========
 @app.on_callback_query()
 async def callback_handler(client, callback_query: CallbackQuery):
-    global user_tasks, _download_pending
-    if user_tasks is None:
-        user_tasks = {}
+    ensure_user_tasks()
+    global _download_pending
     data = callback_query.data
     user_id = callback_query.from_user.id
 
