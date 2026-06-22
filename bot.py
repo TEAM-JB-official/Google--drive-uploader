@@ -69,11 +69,15 @@ def make_safe_progress_callback(status_msg, text, task_id):
     return progress_sync
 
 async def _progress_coro(current, total, status_msg, text, task_id):
-    if total <= 0:
-        return
-    percent = (current * 100) // total
-    bar = "█" * (percent // 5) + "░" * (20 - (percent // 5))
     try:
+        if total <= 0:
+            # Show only downloaded MB if total unknown
+            current_mb = current / (1024*1024)
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{task_id}")]]) if task_id else None
+            await status_msg.edit_text(f"{text}\n⬇️ Downloaded: {current_mb:.1f} MB", reply_markup=keyboard)
+            return
+        percent = (current * 100) // total
+        bar = "█" * (percent // 5) + "░" * (20 - (percent // 5))
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{task_id}")]]) if task_id else None
         await status_msg.edit_text(f"{text}\n[{bar}] {percent}%", reply_markup=keyboard)
     except:
