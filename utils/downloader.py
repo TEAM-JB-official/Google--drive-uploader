@@ -2,8 +2,17 @@ import aiohttp
 import yt_dlp
 import asyncio
 import os
+import uuid
+
+# Limits for free tier (adjust as needed)
+MAX_SIZE_MB = 100          # 100 MB max file size
+MAX_DURATION_SECS = 600    # 10 minutes max duration
 
 async def download_http(url, dest_path, progress_callback=None):
+    """
+    Download a file from an HTTP/HTTPS URL using streaming (2 MB chunks).
+    progress_callback: sync function (current_bytes, total_bytes)
+    """
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
@@ -11,7 +20,7 @@ async def download_http(url, dest_path, progress_callback=None):
             total = int(resp.headers.get('content-length', 0))
             downloaded = 0
             with open(dest_path, 'wb') as f:
-                async for chunk in resp.content.iter_chunked(1024*1024):
+                async for chunk in resp.content.iter_chunked(2 * 1024 * 1024):  # 2 MB chunks
                     f.write(chunk)
                     downloaded += len(chunk)
                     if progress_callback and total:
@@ -20,47 +29,61 @@ async def download_http(url, dest_path, progress_callback=None):
 
 async def download_youtube(url, dest_template, progress_callback=None):
     """
-    YouTube downloader optimised for low memory (free instances).
-    Uses combined format (if available) to avoid merging, and limits to 480p.
-    progress_callback: sync function (downloaded_bytes, total_bytes)
+    Stream YouTube video/audio to disk with size/duration limits.
+    Uses yt-dlp only for metadata, then downloads via aiohttp.
     """
-    def progress_hook(d):
-        if d['status'] == 'downloading':
-            total = d.get('total_bytes', 1)
-            downloaded = d.get('downloaded_bytes', 0)
-            if progress_callback:
-                progress_callback(downloaded, total)
-
-    cookies_arg = {"cookiefile": "cookies.txt"} if os.path.exists("cookies.txt") else {}
-
-    # Use combined format (best[height<=480]) to avoid merging video+audio separately
+    # Extract metadata without downloading
     ydl_opts = {
-        'outtmpl': dest_template,
-        'format': 'best[height<=480]',          # combined format, avoids merging
-        'merge_output_format': 'mp4',           # fallback if merging still needed
         'quiet': True,
         'no_warnings': True,
         'ignoreerrors': True,
         'no_check_certificate': True,
-        'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
-        'extractor_args': {'youtube': {'player_client': ['android'], 'skip': ['hls', 'dash']}},
-        'progress_hooks': [progress_hook] if progress_callback else [],
-        'concurrent_fragment_downloads': 1,    # download fragments one by one
-        'cache': False,                        # no disk cache
-        'no_cache': True,
-        'throttledratelimit': 100000000,
-        **cookies_arg,
+        'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
     }
-    def run():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            return ydl.prepare_filename(info)
-    loop = asyncio.get_running_loop()
-    try:
-        return await loop.run_in_executor(None, run)
-    except Exception as e:
-        # Fallback to TV client if Android fails
-        if "Sign in to confirm" in str(e) or "bot" in str(e).lower():
-            ydl_opts['extractor_args']['youtube']['player_client'] = ['tv']
-            return await loop.run_in_executor(None, run)
-        raise
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            raise Exception(f"Failed to extract info: {e}")
+
+    # Apply size and duration limits
+    duration = info.get('duration', 0)
+    if duration > MAX_DURATION_SECS:
+        raise Exception(f"Video too long: {duration}s (max {MAX_DURATION_SECS}s)")
+    # Use filesize_approx if filesize not available
+    file_size = info.get('filesize') or info.get('filesize_approx') or 0
+    if file_size > MAX_SIZE_MB * 1024 * 1024:
+        raise Exception(f"File too large: {file_size/(1024*1024):.1f} MB (max {MAX_SIZE_MB} MB)")
+
+    # Select the best audio format (small) with a direct download URL
+    formats = info.get('formats', [])
+    selected_format = None
+    # First try audio-only (best quality, but usually small)
+    for f in formats:
+        if f.get('acodec') != 'none' and f.get('url') and 'm3u8' not in f.get('protocol', ''):
+            selected_format = f
+            break
+    # If no audio, fallback to worst video (very small)
+    if not selected_format:
+        for f in formats:
+            if f.get('vcodec') != 'none' and f.get('url') and 'm3u8' not in f.get('protocol', ''):
+                selected_format = f
+                break
+    if not selected_format:
+        raise Exception("No suitable direct download format found (try a different video)")
+
+    direct_url = selected_format['url']
+    # Determine file extension
+    is_audio = selected_format.get('acodec') != 'none' and selected_format.get('vcodec') == 'none'
+    ext = '.mp3' if is_audio else '.mp4'
+    safe_title = "".join(c for c in info.get('title', 'video') if c.isalnum() or c in ' ._-')[:50]
+    unique = uuid.uuid4().hex[:8]
+    # Use dest_template directory
+    dest_dir = os.path.dirname(dest_template)
+    if not dest_dir:
+        dest_dir = '.'
+    final_path = os.path.join(dest_dir, f"{safe_title}_{unique}{ext}")
+
+    # Download the file using streaming (chunked) – no memory spike
+    await download_http(direct_url, final_path, progress_callback)
+    return final_path
