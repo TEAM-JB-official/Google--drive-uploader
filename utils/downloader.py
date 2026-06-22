@@ -20,7 +20,8 @@ async def download_http(url, dest_path, progress_callback=None):
 
 async def download_youtube(url, dest_template, progress_callback=None):
     """
-    YouTube downloader with memory optimisation, cookies support, and progress.
+    YouTube downloader optimised for low memory (free instances).
+    Uses combined format (if available) to avoid merging, and limits to 480p.
     progress_callback: sync function (downloaded_bytes, total_bytes)
     """
     def progress_hook(d):
@@ -28,16 +29,15 @@ async def download_youtube(url, dest_template, progress_callback=None):
             total = d.get('total_bytes', 1)
             downloaded = d.get('downloaded_bytes', 0)
             if progress_callback:
-                # Call the sync callback (will schedule async update)
                 progress_callback(downloaded, total)
 
     cookies_arg = {"cookiefile": "cookies.txt"} if os.path.exists("cookies.txt") else {}
 
-    # Use 720p to reduce memory and processing
+    # Use combined format (best[height<=480]) to avoid merging video+audio separately
     ydl_opts = {
         'outtmpl': dest_template,
-        'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-        'merge_output_format': 'mp4',
+        'format': 'best[height<=480]',          # combined format, avoids merging
+        'merge_output_format': 'mp4',           # fallback if merging still needed
         'quiet': True,
         'no_warnings': True,
         'ignoreerrors': True,
@@ -45,8 +45,9 @@ async def download_youtube(url, dest_template, progress_callback=None):
         'user_agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
         'extractor_args': {'youtube': {'player_client': ['android'], 'skip': ['hls', 'dash']}},
         'progress_hooks': [progress_hook] if progress_callback else [],
-        'concurrent_fragment_downloads': 1,   # reduce memory
-        'cache': False,
+        'concurrent_fragment_downloads': 1,    # download fragments one by one
+        'cache': False,                        # no disk cache
+        'no_cache': True,
         'throttledratelimit': 100000000,
         **cookies_arg,
     }
